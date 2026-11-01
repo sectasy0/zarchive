@@ -970,7 +970,7 @@ pub(crate) fn toolbox_bar(
                             .icon(spaced_icon(gpui::assets::IconName::GitCompare))
                             .on_click(move |_, window, cx| {
                                 let _ = compare_view.update(cx, |this, cx| {
-                                    this.choose_archives_for_comparison(window, cx);
+                                    this.open_comparison_dialog(window, cx);
                                 });
                             }),
                     )

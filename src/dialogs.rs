@@ -411,7 +411,7 @@ fn settings_view(
 pub(crate) fn modal_view(
     dialog: gpui::component::dialog::Dialog,
     modal: Modal,
-    manager: &ArchiveManager,
+    manager: &mut ArchiveManager,
     theme: Theme,
     window: &mut Window,
     cx: &mut Context<ArchiveManager>,
@@ -421,6 +421,7 @@ pub(crate) fn modal_view(
         Modal::Settings => "Settings",
         Modal::About => "About",
         Modal::CreateArchive => "Create archive",
+        Modal::CompareArchives => "Compare archives",
         Modal::Password => "Archive password",
         Modal::Delete => if manager.file_actions.pending_delete.as_ref().is_some_and(|target| target.archive_entry.is_some()) {
             "Remove from archive"
@@ -442,6 +443,14 @@ pub(crate) fn modal_view(
         }
         Modal::CreateArchive => {
             content = content.child(creation::view(manager, theme, cx));
+        }
+        Modal::CompareArchives => {
+            content = content
+                .p_0()
+                .gap_3()
+                .child(crate::inspector::comparison_dialog_content(
+                    manager, theme, window, cx,
+                ));
         }
         Modal::Settings => {
             content = content
@@ -553,13 +562,16 @@ pub(crate) fn modal_view(
     let footer = match modal {
         Modal::Password => password::footer(manager, cx).into_any_element(),
         Modal::CreateArchive => creation::footer(manager, cx).into_any_element(),
+        Modal::CompareArchives => {
+            crate::inspector::comparison_footer(manager, cx).into_any_element()
+        }
         _ => div().h(px(0.0)).into_any_element(),
     };
     ui::center_dialog(dialog, title, footer, manager, window, cx)
-        .width(px(if modal == Modal::Settings {
-            620.0
-        } else {
-            460.0
+        .width(px(match modal {
+            Modal::Settings => 620.0,
+            Modal::CompareArchives => 900.0,
+            _ => 460.0,
         }))
         .overlay_closable(modal != Modal::Password)
         .when(modal == Modal::Password, |this| {
@@ -570,6 +582,7 @@ pub(crate) fn modal_view(
             let _ = view.update(cx, |this, cx| match this.modal {
                 Some(Modal::Password) => this.unlock_archive(window, cx),
                 Some(Modal::CreateArchive) => this.submit_archive(window, cx),
+                Some(Modal::CompareArchives) => this.start_archive_comparison(cx),
                 Some(Modal::Delete) => this.confirm_delete(window, cx),
                 _ => {}
             });

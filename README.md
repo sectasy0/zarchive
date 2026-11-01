@@ -74,7 +74,19 @@ available while your files are processed.
   checksums, and calculate CRC32 and SHA-256 during a full integrity check.
 - **Audit individual archives or batches.** Identify suspicious paths, duplicate
   content, nested archives, unusual compression ratios, and mismatches between
-  file signatures and extensions. Copy inspection reports as JSON.
+  file signatures and extensions. Copy inspection reports as JSON. Choose
+  **Full audit** to bypass the standard limits of 32 archives per batch, 20,000
+  entries, 256 MiB per entry, 1 GiB total data, and 500 findings. The 7z
+  dictionary safety limit of 128 MiB remains in effect.
+- **Compare two archives.** Select archive A and archive B in separate fields to
+  compare files, directories, moves and renames, empty folders, content, and
+  available metadata. Results distinguish byte equality from semantic equality
+  for JSON, XML, YAML, and TOML, and include SHA-256, SHA-512, BLAKE3, CRC32,
+  compression, permissions, and other metadata when available. Supported nested
+  archives are compared up to four levels deep and 128 nested archives. Large
+  structured files over 8 MiB are not semantically parsed, and text diffs are
+  limited to files up to 2 MiB; byte comparisons and hashes still process the
+  full file. Copy or save the visual comparison report as JSON.
 - **Drag and drop.** Open archives, navigate to folders, or add files and folders
   to a new archive directly from your desktop.
   Drag files or folders from the file list or desktop onto an existing archive,

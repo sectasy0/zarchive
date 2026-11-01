@@ -756,6 +756,13 @@ const TRANSLATIONS: &[(&str, &str, &str, &str, &str, &str)] = &[
         "アーカイブを比較",
         "Archive vergleichen",
     ),
+    ("Archive A", "Archiwum A", "压缩文件 A", "Archivo comprimido A", "アーカイブ A", "Archiv A"),
+    ("Archive B", "Archiwum B", "压缩文件 B", "Archivo comprimido B", "アーカイブ B", "Archiv B"),
+    ("Choose archive", "Wybierz archiwum", "选择压缩文件", "Elegir archivo comprimido", "アーカイブを選択", "Archiv auswählen"),
+    ("No archive selected", "Nie wybrano archiwum", "未选择压缩文件", "No se seleccionó ningún archivo", "アーカイブが選択されていません", "Kein Archiv ausgewählt"),
+    ("Select both archives to compare", "Wybierz oba archiwa do porównania", "请选择两个压缩文件进行比较", "Selecciona ambos archivos para compararlos", "比較する2つのアーカイブを選択してください", "Wählen Sie beide Archive zum Vergleichen aus"),
+    ("Start comparison", "Rozpocznij porównanie", "开始比较", "Iniciar comparación", "比較を開始", "Vergleich starten"),
+    ("Run comparison again", "Porównaj ponownie", "重新比较", "Volver a comparar", "再比較", "Erneut vergleichen"),
     ("Comparison", "Porównanie", "比较", "Comparación", "比較", "Vergleich"),
     (
         "Comparing archives...",
@@ -936,6 +943,7 @@ const TRANSLATIONS: &[(&str, &str, &str, &str, &str, &str)] = &[
     ("Differences", "Różnice", "差异", "Diferencias", "差分", "Unterschiede"),
     ("Content", "Zawartość", "内容", "Contenido", "内容", "Inhalt"),
     ("Metadata", "Metadane", "元数据", "Metadatos", "メタデータ", "Metadaten"),
+    ("More details", "więcej szczegółów", "更多详情", "más detalles", "詳細", "weitere Details"),
     (
         "No comparison results",
         "Brak wyników porównania",
@@ -1010,6 +1018,7 @@ const TRANSLATIONS: &[(&str, &str, &str, &str, &str, &str)] = &[
         "Dateityp geändert",
     ),
     ("Moved", "Przeniesiony", "已移动", "Movido", "移動", "Verschoben"),
+    ("Moved or renamed", "Przeniesione lub przemianowane", "已移动或重命名", "Movido o renombrado", "移動または名前変更", "Verschoben oder umbenannt"),
     ("Renamed", "Zmieniona nazwa", "已重命名", "Renombrado", "名前変更", "Umbenannt"),
     (
         "Moved and renamed",
@@ -1330,6 +1339,8 @@ const TRANSLATIONS: &[(&str, &str, &str, &str, &str, &str)] = &[
     ("Accessed", "Ostatni dostęp", "访问时间", "Último acceso", "最終アクセス", "Letzter Zugriff"),
     ("Archive comment", "Komentarz archiwum", "压缩文件注释", "Comentario del archivo comprimido", "アーカイブコメント", "Archivkommentar"),
     ("Integrity", "Integralność", "完整性", "Integridad", "整合性", "Integrität"),
+    ("Integrity A", "Integralność A", "完整性 A", "Integridad A", "整合性 A", "Integrität A"),
+    ("Integrity B", "Integralność B", "完整性 B", "Integridad B", "整合性 B", "Integrität B"),
     ("Directories", "Katalogi", "目录", "Directorios", "ディレクトリ", "Verzeichnisse"),
     ("Entries with permissions", "Wpisy z uprawnieniami", "包含权限的条目", "Entradas con permisos", "権限のあるエントリ", "Einträge mit Berechtigungen"),
     ("Entries with owner/group", "Wpisy z właścicielem/grupą", "包含所有者/组的条目", "Entradas con propietario/grupo", "所有者/グループ情報のあるエントリ", "Einträge mit Eigentümer/Gruppe"),

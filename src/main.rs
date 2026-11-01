@@ -60,6 +60,8 @@ enum Modal {
     Password,
     /// Confirmation before moving an item to Trash.
     Delete,
+    /// Selects two archives and displays their comparison report.
+    CompareArchives,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -198,6 +200,7 @@ struct ArchiveManager {
     filters: filters::FilterBar,
     file_actions: file_actions::FileActions,
     inspector: inspector::Inspector,
+    comparison_dialog: inspector::ComparisonDialog,
     background_queue: task_queue::BackgroundQueue,
 }
 
@@ -437,7 +440,7 @@ impl ArchiveManager {
     }
 
     /// Captures the backdrop, opens a modal, and transfers focus into it.
-    fn show_modal(&mut self, modal: Modal, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn show_modal(&mut self, modal: Modal, window: &mut Window, cx: &mut Context<Self>) {
         if modal == Modal::CreateArchive && self.creation_task.is_some() {
             return;
         }
@@ -463,6 +466,9 @@ impl ArchiveManager {
             self.creation.password.clear();
             self.creation.confirmation.clear();
             self.creation.encrypt = false;
+        }
+        if self.modal == Some(Modal::CompareArchives) {
+            self.comparison_dialog.close();
         }
         self.modal = None;
         window.focus(&self.content_focus, cx);
@@ -628,7 +634,9 @@ impl Render for ArchiveManager {
                     language.text("Size unavailable").to_owned()
                 }
             });
-        let status_message = if self.inspector.is_busy() {
+        let status_message = if self.comparison_dialog.is_busy() {
+            Some(language.text("Comparing archives...").to_owned())
+        } else if self.inspector.is_busy() {
             Some(language.text("Inspecting archive...").to_owned())
         } else if self.file_actions.delete_task.is_some() {
             Some(language.text("Moving to Trash...").to_owned())
@@ -2026,6 +2034,7 @@ fn main() {
                             filters: filters::FilterBar::default(),
                             file_actions: file_actions::FileActions::default(),
                             inspector: inspector::Inspector::default(),
+                            comparison_dialog: inspector::ComparisonDialog::default(),
                             background_queue: task_queue::BackgroundQueue::default(),
                         }
                     })
@@ -2158,6 +2167,7 @@ mod tests {
             filters: crate::filters::FilterBar::default(),
             file_actions: crate::file_actions::FileActions::default(),
             inspector: crate::inspector::Inspector::default(),
+            comparison_dialog: crate::inspector::ComparisonDialog::default(),
             background_queue: crate::task_queue::BackgroundQueue::default(),
         }
     }

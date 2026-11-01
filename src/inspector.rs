@@ -30,8 +30,6 @@ pub enum InspectorTab {
     Entries,
     /// Audit findings and safety warnings.
     Findings,
-    /// Differences between two archive trees and their contents.
-    Comparison,
 }
 
 /// Owns inspection jobs, reports, active selection, and panel state.
@@ -45,8 +43,6 @@ pub struct Inspector {
     pub tab: InspectorTab,
     /// Reports returned by the latest inspection request.
     pub reports: Vec<Arc<Report>>,
-    /// Result of the latest archive comparison.
-    pub comparison: Option<Arc<ComparisonReport>>,
     /// Index of the report currently displayed.
     pub active: usize,
     /// Selected archive entry name, when the Entries tab has a selection.
@@ -58,7 +54,6 @@ pub struct Inspector {
     passwords: std::collections::BTreeMap<PathBuf, Option<ArchivePassword>>,
     entries_view: Option<gpui::Entity<EntryPane>>,
     findings_view: Option<gpui::Entity<FindingsPane>>,
-    comparison_view: Option<gpui::Entity<ComparisonPane>>,
     revision: u64,
     source: Option<PathBuf>,
     cancel: Arc<AtomicBool>,
@@ -74,7 +69,6 @@ impl Default for Inspector {
             mode: InspectionMode::Preview,
             tab: InspectorTab::Overview,
             reports: Vec::new(),
-            comparison: None,
             active: 0,
             selected_name: None,
             batch_limited: false,
@@ -83,7 +77,6 @@ impl Default for Inspector {
             passwords: std::collections::BTreeMap::new(),
             entries_view: None,
             findings_view: None,
-            comparison_view: None,
             revision: 0,
             source: None,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -95,8 +88,7 @@ impl Default for Inspector {
 impl Inspector {
     pub(crate) fn preview_height(&self, window_height: gpui::Pixels) -> gpui::Pixels {
         let maximum = (window_height - px(220.0)).max(px(80.0));
-        self.height.unwrap_or((window_height * 0.4).min(px(258.0)))
-            .clamp(px(80.0), maximum)
+        self.height.unwrap_or((window_height * 0.4).min(px(258.0))).clamp(px(80.0), maximum)
     }
 
     pub(crate) fn clear_text_preview(&mut self) {
@@ -117,10 +109,59 @@ impl Inspector {
         self.task = None;
         self.entries_view = None;
         self.findings_view = None;
-        self.comparison_view = None;
-        self.comparison = None;
         self.visible = false;
         self.source = None;
+        self.revision = self.revision.wrapping_add(1);
+    }
+}
+
+pub(crate) struct ComparisonDialog {
+    path_a: Option<PathBuf>,
+    path_b: Option<PathBuf>,
+    report: Option<Arc<ComparisonReport>>,
+    error: Option<String>,
+    task: Option<u64>,
+    cancel: Arc<AtomicBool>,
+    revision: u64,
+    view: Option<gpui::Entity<ComparisonPane>>,
+}
+
+impl Default for ComparisonDialog {
+    fn default() -> Self {
+        Self {
+            path_a: None,
+            path_b: None,
+            report: None,
+            error: None,
+            task: None,
+            cancel: Arc::new(AtomicBool::new(false)),
+            revision: 0,
+            view: None,
+        }
+    }
+}
+
+impl ComparisonDialog {
+    pub(crate) fn is_busy(&self) -> bool {
+        self.task.is_some()
+    }
+
+    fn reset(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.path_a = None;
+        self.path_b = None;
+        self.report = None;
+        self.error = None;
+        self.task = None;
+        self.cancel = Arc::new(AtomicBool::new(false));
+        self.view = None;
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    pub(crate) fn close(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.task = None;
+        self.view = None;
         self.revision = self.revision.wrapping_add(1);
     }
 }
@@ -158,41 +199,34 @@ pub(crate) fn resize_preview(
 }
 
 impl ArchiveManager {
-    pub(crate) fn choose_archives_for_comparison(
+    pub(crate) fn open_comparison_dialog(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(paths) = rfd::FileDialog::new()
-            .set_title(self.language.text("Compare archives"))
-            .pick_files()
-        else {
+        self.comparison_dialog.reset();
+        self.show_modal(crate::Modal::CompareArchives, window, cx);
+    }
+
+    pub(crate) fn choose_comparison_archive_a(&mut self, cx: &mut Context<Self>) {
+        self.choose_comparison_archive(true, cx);
+    }
+
+    pub(crate) fn choose_comparison_archive_b(&mut self, cx: &mut Context<Self>) {
+        self.choose_comparison_archive(false, cx);
+    }
+
+    fn choose_comparison_archive(&mut self, archive_a: bool, cx: &mut Context<Self>) {
+        let label = if archive_a { "Archive A" } else { "Archive B" };
+        let mut picker = rfd::FileDialog::new().set_title(self.language.text(label));
+        if let Some(directory) = self.current_directory.as_deref() {
+            picker = picker.set_directory(directory);
+        }
+        let Some(path) = picker.pick_file() else {
             return;
         };
-        if paths.len() != 2 {
-            self.status_message = Some(
-                self.language
-                    .text("Select exactly two archives to compare")
-                    .to_owned(),
-            );
-            cx.notify();
-            return;
-        }
-        let path_a = paths[0].clone();
-        let path_b = paths[1].clone();
-        if path_a == path_b {
-            self.status_message = Some(
-                self.language
-                    .text("Choose two different archives")
-                    .to_owned(),
-            );
-            cx.notify();
-            return;
-        }
-        if !crate::archive::is_supported_archive(&path_a)
-            || !crate::archive::is_supported_archive(&path_b)
-        {
-            self.status_message = Some(
+        if !crate::archive::is_supported_archive(&path) {
+            self.comparison_dialog.error = Some(
                 self.language
                     .text("Both files must be supported archives")
                     .to_owned(),
@@ -200,31 +234,50 @@ impl ArchiveManager {
             cx.notify();
             return;
         }
-        self.start_archive_comparison(path_a, path_b, cx);
-        let _ = window;
+        if archive_a {
+            self.comparison_dialog.path_a = Some(path);
+        } else {
+            self.comparison_dialog.path_b = Some(path);
+        }
+        self.comparison_dialog.report = None;
+        self.comparison_dialog.error = None;
+        self.comparison_dialog.view = None;
+        cx.notify();
     }
 
-    fn start_archive_comparison(
-        &mut self,
-        path_a: PathBuf,
-        path_b: PathBuf,
-        cx: &mut Context<Self>,
-    ) {
-        self.inspector.close();
-        self.inspector.visible = true;
-        self.inspector.tab = InspectorTab::Comparison;
-        self.inspector.mode = InspectionMode::Preview;
-        self.inspector.reports.clear();
-        self.inspector.comparison = None;
-        self.inspector.comparison_view = None;
-        self.inspector.active = 0;
-        self.inspector.batch_limited = false;
-        self.inspector.cancel = Arc::new(AtomicBool::new(false));
-        let cancel = self.inspector.cancel.clone();
+    pub(crate) fn start_archive_comparison(&mut self, cx: &mut Context<Self>) {
+        let (Some(path_a), Some(path_b)) = (
+            self.comparison_dialog.path_a.clone(),
+            self.comparison_dialog.path_b.clone(),
+        ) else {
+            self.comparison_dialog.error = Some(
+                self.language
+                    .text("Select both archives to compare")
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        };
+        if path_a == path_b {
+            self.comparison_dialog.error = Some(
+                self.language
+                    .text("Choose two different archives")
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        self.comparison_dialog.cancel.store(true, Ordering::Relaxed);
+        self.comparison_dialog.cancel = Arc::new(AtomicBool::new(false));
+        self.comparison_dialog.report = None;
+        self.comparison_dialog.error = None;
+        self.comparison_dialog.view = None;
+        let cancel = self.comparison_dialog.cancel.clone();
         let control = crate::task_queue::TaskControl::with_cancel(cancel.clone())
             .for_paths([path_a.clone(), path_b.clone()]);
-        let revision = self.inspector.revision;
-        self.inspector.task = Some(self.background_queue.enqueue(
+        self.comparison_dialog.revision = self.comparison_dialog.revision.wrapping_add(1);
+        let revision = self.comparison_dialog.revision;
+        self.comparison_dialog.task = Some(self.background_queue.enqueue(
             "Comparing archives...",
             control,
             move |control, reporter| async move {
@@ -238,15 +291,17 @@ impl ArchiveManager {
                 Ok(report)
             },
             move |this, result, _, cx| {
-                if this.inspector.revision != revision || !this.inspector.visible {
+                if this.comparison_dialog.revision != revision
+                    || this.modal != Some(crate::Modal::CompareArchives)
+                {
                     return;
                 }
-                this.inspector.task = None;
+                this.comparison_dialog.task = None;
                 match result {
-                    Ok(report) => this.inspector.comparison = Some(Arc::new(report)),
+                    Ok(report) => this.comparison_dialog.report = Some(Arc::new(report)),
                     Err(crate::task_queue::TaskFailure::Cancelled) => {}
                     Err(crate::task_queue::TaskFailure::Failed(error)) => {
-                        this.status_message = Some(format!(
+                        this.comparison_dialog.error = Some(format!(
                             "{}: {error:#}",
                             this.language.text("Could not compare archives")
                         ));
@@ -384,10 +439,8 @@ impl ArchiveManager {
         self.inspector.mode = mode;
         self.inspector.active = 0;
         self.inspector.reports.clear();
-        self.inspector.comparison = None;
         self.inspector.entries_view = None;
         self.inspector.findings_view = None;
-        self.inspector.comparison_view = None;
         self.inspector.selected_name = None;
         self.inspector.tab = if mode.is_audit() {
             InspectorTab::Findings
@@ -466,33 +519,20 @@ impl ArchiveManager {
     }
 
     fn export_inspection_report(&mut self, cx: &mut Context<Self>) {
-        if self.inspector.reports.is_empty() && self.inspector.comparison.is_none() {
+        if self.inspector.reports.is_empty() {
             return;
         }
         let language = self.language;
-        let comparison = self.inspector.comparison.clone();
         let mut dialog = rfd::FileDialog::new()
-            .set_title(language.text(if comparison.is_some() {
-                "Save comparison report"
-            } else {
-                "Save inspection report"
-            }))
-            .set_file_name(if comparison.is_some() {
-                "zarchive-comparison-report.json"
-            } else {
-                "zarchive-inspection-report.json"
-            })
+            .set_title(language.text("Save inspection report"))
+            .set_file_name("zarchive-inspection-report.json")
             .add_filter("JSON", &["json"]);
-        let default_directory = comparison
-            .as_ref()
-            .and_then(|report| Path::new(&report.archive_a).parent())
-            .or_else(|| {
-                self.inspector
-                    .reports
-                    .get(self.inspector.active)
-                    .and_then(|report| report.path.parent())
-            });
-        if let Some(parent) = default_directory {
+        if let Some(parent) = self
+            .inspector
+            .reports
+            .get(self.inspector.active)
+            .and_then(|report| report.path.parent())
+        {
             dialog = dialog.set_directory(parent);
         }
         let Some(path) = dialog.save_file() else {
@@ -503,9 +543,6 @@ impl ArchiveManager {
             .reports
             .iter()
             .any(|report| report.path == path)
-            || comparison.as_ref().is_some_and(|report| {
-                Path::new(&report.archive_a) == path || Path::new(&report.archive_b) == path
-            })
         {
             self.status_message = Some(
                 language
@@ -516,15 +553,13 @@ impl ArchiveManager {
             return;
         }
         let reports = self.inspector.reports.clone();
-        let comparison_json = comparison.map(|report| report.json());
         let mode = self.inspector.mode;
         let batch_limited = self.inspector.batch_limited;
         self.background_queue.enqueue(
             "Exporting report...",
             crate::task_queue::TaskControl::default().for_paths([path.clone()]),
             move |_, _| async move {
-                let data = comparison_json
-                    .unwrap_or_else(|| report_bundle_json(mode, batch_limited, &reports));
+                let data = report_bundle_json(mode, batch_limited, &reports);
                 std::fs::write(path, serde_json::to_vec_pretty(&data)?)?;
                 Ok(())
             },
@@ -546,13 +581,59 @@ impl ArchiveManager {
             cx,
         );
     }
+
+    fn export_comparison_report(&mut self, cx: &mut Context<Self>) {
+        let Some(report) = self.comparison_dialog.report.clone() else {
+            return;
+        };
+        let language = self.language;
+        let mut dialog = rfd::FileDialog::new()
+            .set_title(language.text("Save comparison report"))
+            .set_file_name("zarchive-comparison-report.json")
+            .add_filter("JSON", &["json"]);
+        if let Some(parent) = Path::new(&report.archive_a).parent() {
+            dialog = dialog.set_directory(parent);
+        }
+        let Some(path) = dialog.save_file() else {
+            return;
+        };
+        if Path::new(&report.archive_a) == path || Path::new(&report.archive_b) == path {
+            self.comparison_dialog.error = Some(
+                language
+                    .text("Report path must differ from archive")
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        self.background_queue.enqueue(
+            "Exporting report...",
+            crate::task_queue::TaskControl::default().for_paths([path.clone()]),
+            move |_, _| async move {
+                std::fs::write(path, serde_json::to_vec_pretty(&report.json())?)?;
+                Ok(())
+            },
+            move |this, result, _, cx| {
+                match result {
+                    Ok(()) => this.status_message = Some(this.language.text("Report saved").to_owned()),
+                    Err(crate::task_queue::TaskFailure::Cancelled) => {}
+                    Err(crate::task_queue::TaskFailure::Failed(error)) => {
+                        this.comparison_dialog.error = Some(format!(
+                            "{}: {error:#}",
+                            this.language.text("Could not save report")
+                        ));
+                    }
+                }
+                cx.notify();
+            },
+            cx,
+        );
+    }
 }
 
 /// Renders one label/value pair in the inspection overview.
 fn detail(label: &'static str, value: String, theme: Theme) -> impl IntoElement {
     div()
-        .id("archive-metadata-overview")
-        .debug_selector(|| "archive-metadata-overview".to_owned())
         .flex()
         .flex_col()
         .gap_1()
@@ -633,6 +714,8 @@ fn archive_metadata_overview(
     let entry_count = report.entries.len();
 
     div()
+        .id("archive-metadata-overview")
+        .debug_selector(|| "archive-metadata-overview".to_owned())
         .flex()
         .flex_col()
         .gap_1()
@@ -1221,7 +1304,28 @@ mod tests {
     }
 
     #[gpui::test]
-    fn comparison_tab_renders_results_and_filters_common_entries(
+    fn compare_archives_command_opens_two_independent_file_fields(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, cx) = crate::tests::component_window(cx, |_, cx| {
+            let mut manager = crate::tests::test_manager(cx);
+            manager.current_directory = None;
+            manager
+        });
+        click_inspect_action(cx, "Compare archives");
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("comparison-archive-a").is_some());
+        assert!(cx.debug_bounds("comparison-archive-b").is_some());
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert!(matches!(manager.modal, Some(crate::Modal::CompareArchives)));
+            assert!(!manager.inspector.visible);
+        });
+    }
+
+    #[gpui::test]
+    fn comparison_dialog_renders_separate_inputs_and_filters_results(
         cx: &mut gpui::TestAppContext,
     ) {
         let directory = tempfile::tempdir().unwrap();
@@ -1247,26 +1351,42 @@ mod tests {
             )
             .unwrap(),
         );
-        let (view, cx) = crate::tests::component_window(cx, |_, cx| {
+        let (view, cx) = crate::tests::component_window(cx, |window, cx| {
             let mut manager = crate::tests::test_manager(cx);
-            manager.inspector.visible = true;
-            manager.inspector.tab = InspectorTab::Comparison;
-            manager.inspector.comparison = Some(report);
+            manager.comparison_dialog.path_a = Some(path_a);
+            manager.comparison_dialog.path_b = Some(path_b);
+            manager.comparison_dialog.report = Some(report);
+            manager.show_modal(crate::Modal::CompareArchives, window, cx);
             manager
         });
+        assert!(cx.debug_bounds("comparison-archive-a").is_some());
+        assert!(cx.debug_bounds("comparison-archive-b").is_some());
         assert!(cx.debug_bounds("archive-comparison-summary").is_some());
         assert!(cx.debug_bounds("archive-comparison-list").is_some());
         assert!(cx.debug_bounds("archive-comparison-item-0").is_some());
         assert!(cx.debug_bounds("archive-comparison-item-1").is_some());
+        let dialog_bounds = cx.debug_bounds("dialog-0").unwrap();
+        let footer_bounds = cx.debug_bounds("comparison-actions").unwrap();
+        let report_actions_bounds = cx.debug_bounds("comparison-report-actions").unwrap();
+        let copy_bounds = cx.debug_bounds("copy-comparison-report").unwrap();
+        let save_bounds = cx.debug_bounds("save-comparison-report").unwrap();
+        let start_bounds = cx.debug_bounds("comparison-start").unwrap();
+        assert!(report_actions_bounds.left() >= dialog_bounds.left());
+        assert!(copy_bounds.right() <= save_bounds.left());
+        assert!(save_bounds.right() <= start_bounds.left());
+        assert!(save_bounds.bottom() <= footer_bounds.bottom());
+        assert!(start_bounds.right() <= dialog_bounds.right());
+        assert!(start_bounds.right() >= footer_bounds.right() - px(2.0));
         cx.update(|window, cx| window.click("Differences", cx));
         cx.run_until_parked();
         assert!(cx.debug_bounds("archive-comparison-item-0").is_some());
         assert!(cx.debug_bounds("archive-comparison-item-1").is_none());
-        assert!(cx.read(|cx| view.read(cx).inspector.comparison_view.is_some()));
+        assert!(cx.read(|cx| view.read(cx).comparison_dialog.view.is_some()));
+        assert!(cx.read(|cx| !view.read(cx).inspector.visible));
     }
 
     #[gpui::test]
-    fn comparison_task_publishes_its_report_to_the_inspector(cx: &mut gpui::TestAppContext) {
+    fn comparison_task_publishes_its_report_to_the_modal(cx: &mut gpui::TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("shared.txt");
         std::fs::write(&source, b"shared content").unwrap();
@@ -1284,20 +1404,22 @@ mod tests {
             crate::archive::CreateOptions::default(),
         )
         .unwrap();
-        let (view, cx) = crate::tests::component_window(cx, |_, cx| {
+        let (view, cx) = crate::tests::component_window(cx, |window, cx| {
             let mut manager = crate::tests::test_manager(cx);
             manager.current_directory = None;
+            manager.comparison_dialog.path_a = Some(path_a.clone());
+            manager.comparison_dialog.path_b = Some(path_b.clone());
+            manager.show_modal(crate::Modal::CompareArchives, window, cx);
+            manager.start_archive_comparison(cx);
             manager
-        });
-        view.update(cx, |manager, cx| {
-            manager.start_archive_comparison(path_a, path_b, cx);
         });
         cx.run_until_parked();
         cx.read(|cx| {
             let manager = view.read(cx);
-            assert!(!manager.inspector.is_busy());
-            assert!(matches!(manager.inspector.tab, InspectorTab::Comparison));
-            assert!(manager.inspector.comparison.is_some());
+            assert!(!manager.comparison_dialog.is_busy());
+            assert!(manager.comparison_dialog.report.is_some());
+            assert!(matches!(manager.modal, Some(crate::Modal::CompareArchives)));
+            assert!(!manager.inspector.visible);
         });
     }
 
@@ -2188,37 +2310,6 @@ pub fn view(
     } else {
         None
     };
-    let comparison_view = if manager.inspector.tab == InspectorTab::Comparison {
-        manager.inspector.comparison.clone().map(|report| {
-            let pane = manager.inspector.comparison_view.get_or_insert_with(|| {
-                cx.new(|_| ComparisonPane {
-                    report: report.clone(),
-                    scroll: gpui::UniformListScrollHandle::new(),
-                    filter: ComparisonFilter::All,
-                    language,
-                    theme,
-                })
-            });
-            pane.update(cx, |pane, cx| {
-                let changed = !Arc::ptr_eq(&pane.report, &report)
-                    || pane.language != language
-                    || pane.theme.surface != theme.surface;
-                if !Arc::ptr_eq(&pane.report, &report) {
-                    pane.report = report;
-                    pane.scroll = gpui::UniformListScrollHandle::new();
-                    pane.filter = ComparisonFilter::All;
-                }
-                pane.language = language;
-                pane.theme = theme;
-                if changed {
-                    cx.notify();
-                }
-            });
-            pane.clone()
-        })
-    } else {
-        None
-    };
     let state = &manager.inspector;
     let mut body = div().id("inspector-content").flex().flex_col().gap_2();
     body = if state.tab == InspectorTab::Findings {
@@ -2231,7 +2322,6 @@ pub fn view(
             InspectorTab::Overview => body.child(overview_skeleton(theme)),
             InspectorTab::Entries => body,
             InspectorTab::Findings => body,
-            InspectorTab::Comparison => body,
         };
     } else if let Some(report) = state.reports.get(state.active) {
         match state.tab {
@@ -2361,11 +2451,6 @@ pub fn view(
             }
             InspectorTab::Entries => {}
             InspectorTab::Findings => {}
-            InspectorTab::Comparison => {}
-        }
-    } else if state.tab == InspectorTab::Comparison {
-        if let Some(report) = &state.comparison {
-            body = body.child(comparison_summary(report, language, theme));
         }
     }
     let overview_failed = state
@@ -2384,7 +2469,7 @@ pub fn view(
     div().id("archive-inspector").debug_selector(|| "archive-inspector".into()).flex().flex_col()
         .h(height).min_h(px(0.0)).flex_shrink_0().border_t_1().border_color(rgb(theme.border)).bg(rgb(theme.surface))
         .child(div().flex().flex_wrap().items_center().gap_2().min_h(px(34.0)).flex_shrink_0().px_2().border_b_1().border_color(rgb(theme.border))
-            .children([(InspectorTab::Overview, "Overview"), (InspectorTab::Entries, "Entries"), (InspectorTab::Findings, "Audit findings"), (InspectorTab::Comparison, "Comparison")].into_iter().map(|(tab, label)| {
+            .children([(InspectorTab::Overview, "Overview"), (InspectorTab::Entries, "Entries"), (InspectorTab::Findings, "Audit findings")].into_iter().map(|(tab, label)| {
                 let text = if tab == InspectorTab::Findings && audit_findings_count > 0 {
                     format!("{} ({audit_findings_count})", language.text(label))
                 } else {
@@ -2413,14 +2498,13 @@ pub fn view(
             }))
             .child(div().flex_1())
             .child(Button::new("copy-inspection-report").ghost().xsmall().icon(gpui::assets::IconName::Copy).tooltip(language.text("Copy report"))
-                .disabled(state.reports.is_empty() && state.comparison.is_none()).on_click(cx.listener(|this, _, _, cx| {
-                    let data = this.inspector.comparison.as_ref().map(|report| report.json())
-                        .unwrap_or_else(|| report_bundle_json(this.inspector.mode, this.inspector.batch_limited, &this.inspector.reports));
+                .disabled(state.reports.is_empty()).on_click(cx.listener(|this, _, _, cx| {
+                    let data = report_bundle_json(this.inspector.mode, this.inspector.batch_limited, &this.inspector.reports);
                     if let Ok(text) = serde_json::to_string_pretty(&data) { cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)); }
                 })))
             .child(Button::new("save-inspection-report").ghost().xsmall().icon(gpui::assets::IconName::Save).tooltip(language.text("Save report"))
                 .accessibility_label(language.text("Save report"))
-                .disabled(state.reports.is_empty() && state.comparison.is_none()).on_click(cx.listener(|this, _, _, cx| {
+                .disabled(state.reports.is_empty()).on_click(cx.listener(|this, _, _, cx| {
                     this.export_inspection_report(cx);
                 })))
             .when(state.reports.len() > 1, |this| this
@@ -2441,25 +2525,6 @@ pub fn view(
                 .min_h(px(0.0))
                 .child(body.flex_shrink_0())
                 .child(findings_skeleton(theme))
-                .into_any_element()
-        } else if state.is_busy() && state.tab == InspectorTab::Comparison {
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h(px(0.0))
-                .child(body.flex_shrink_0())
-                .child(findings_skeleton(theme))
-                .into_any_element()
-        } else if let Some(pane) = comparison_view {
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h(px(0.0))
-                .overflow_hidden()
-                .child(body.flex_shrink_0())
-                .child(pane)
                 .into_any_element()
         } else if let Some(pane) = entries_view {
             pane.into_any_element()
@@ -2517,6 +2582,50 @@ fn comparison_summary(
         .iter()
         .filter(|item| item.kind != DifferenceKind::Common)
         .count();
+    let only_a = report
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.kind,
+                DifferenceKind::OnlyInA
+                    | DifferenceKind::DirectoryOnlyInA
+                    | DifferenceKind::EmptyDirectoryOnlyInA
+            )
+        })
+        .count();
+    let only_b = report
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.kind,
+                DifferenceKind::OnlyInB
+                    | DifferenceKind::DirectoryOnlyInB
+                    | DifferenceKind::EmptyDirectoryOnlyInB
+            )
+        })
+        .count();
+    let moved = report
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.kind,
+                DifferenceKind::Moved | DifferenceKind::Renamed | DifferenceKind::MovedAndRenamed
+            )
+        })
+        .count();
+    let content_changed = report
+        .items
+        .iter()
+        .filter(|item| item.kind == DifferenceKind::ContentChanged)
+        .count();
+    let metadata_changed = report
+        .items
+        .iter()
+        .filter(|item| item.kind == DifferenceKind::MetadataChanged)
+        .count();
     let foreground = if report.complete {
         if theme.window < 0x808080 { 0x86efac } else { 0x166534 }
     } else if theme.window < 0x808080 {
@@ -2529,10 +2638,10 @@ fn comparison_summary(
         .debug_selector(|| "archive-comparison-summary".to_owned())
         .flex()
         .flex_col()
-        .gap_1()
+        .gap_2()
         .w_full()
-        .px_3()
-        .py_2()
+        .px_1()
+        .py_1()
         .border_b_1()
         .border_color(rgb(theme.subtle_border))
         .child(
@@ -2540,6 +2649,14 @@ fn comparison_summary(
                 .flex()
                 .items_center()
                 .gap_2()
+                .min_h(px(24.0))
+                .child(
+                    div()
+                        .w(px(7.0))
+                        .h(px(7.0))
+                        .rounded_full()
+                        .bg(rgb(foreground)),
+                )
                 .child(
                     div()
                         .text_sm()
@@ -2550,20 +2667,44 @@ fn comparison_summary(
                 .child(div().flex_1())
                 .child(
                     div()
-                        .text_xs()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(rgb(theme.muted_text))
-                        .child(format!("{} / {}", changed, report.items.len())),
+                        .child(format!(
+                            "{changed} {}",
+                            language.text("Differences").to_lowercase()
+                        )),
                 ),
         )
         .child(
             div()
                 .flex()
                 .flex_wrap()
+                .gap_1()
+                .child(comparison_metric("Only in archive A", only_a, language, theme))
+                .child(comparison_metric("Only in archive B", only_b, language, theme))
+                .child(comparison_metric("Moved or renamed", moved, language, theme))
+                .child(comparison_metric("Content changed", content_changed, language, theme))
+                .child(comparison_metric("Metadata changed", metadata_changed, language, theme)),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
                 .gap_3()
                 .text_xs()
                 .text_color(rgb(theme.muted_text))
-                .child(format!("A: {:?}", report.integrity_a))
-                .child(format!("B: {:?}", report.integrity_b))
+                .child(format!(
+                    "{}: {}",
+                    language.text("Integrity A"),
+                    language.text(integrity_label(report.integrity_a))
+                ))
+                .child(format!(
+                    "{}: {}",
+                    language.text("Integrity B"),
+                    language.text(integrity_label(report.integrity_b))
+                ))
                 .child(format!(
                     "{}: {}",
                     language.text("Nested archives analyzed"),
@@ -2579,6 +2720,257 @@ fn comparison_summary(
             )
         })
 }
+
+fn comparison_metric(
+    label: &'static str,
+    value: usize,
+    language: crate::i18n::Language,
+    theme: Theme,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .min_w(px(112.0))
+        .flex_1()
+        .gap_1()
+        .px_2()
+        .py_1()
+        .border_l_1()
+        .border_color(rgb(theme.subtle_border))
+        .child(
+            div()
+                .text_base()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(value.to_string()),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(theme.muted_text))
+                .child(language.text(label)),
+        )
+}
+
+fn integrity_label(integrity: Integrity) -> &'static str {
+    match integrity {
+        Integrity::NotTested => "Not tested",
+        Integrity::Passed => "Integrity passed",
+        Integrity::Failed => "Integrity check failed",
+        Integrity::Incomplete => "Inspection incomplete",
+        Integrity::PasswordRequired => "Password required",
+    }
+}
+
+    pub(crate) fn comparison_dialog_content(
+        manager: &mut ArchiveManager,
+        theme: Theme,
+        window: &Window,
+        cx: &mut Context<ArchiveManager>,
+    ) -> impl IntoElement {
+        let language = manager.language;
+        let path_a = manager
+            .comparison_dialog
+            .path_a
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| language.text("No archive selected").to_owned());
+        let path_b = manager
+            .comparison_dialog
+            .path_b
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| language.text("No archive selected").to_owned());
+        let busy = manager.comparison_dialog.is_busy();
+        let report = manager.comparison_dialog.report.clone();
+        let error = manager.comparison_dialog.error.clone();
+        let path_a_label = language.text("Archive A");
+        let path_b_label = language.text("Archive B");
+        let mut content = div()
+            .id("comparison-dialog-content")
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w_full()
+            .max_h((window.viewport_size().height - px(180.0)).max(px(280.0)));
+        for (field, label, path, selector, choose_a) in [
+            ("comparison-archive-a", path_a_label, path_a, "comparison-select-a", true),
+            ("comparison-archive-b", path_b_label, path_b, "comparison-select-b", false),
+        ] {
+            let action = Button::new(selector)
+                .custom(
+                    gpui::component::button::ButtonCustomVariant::new(cx)
+                        .color(rgb(theme.surface).into())
+                        .foreground(rgb(theme.soft_accent()).into())
+                        .hover(rgb(theme.hover).into())
+                        .active(rgb(theme.selection).into()),
+                )
+                .w_full()
+                .h(px(32.0))
+                .rounded_sm()
+                .border_1()
+                .border_color(rgb(theme.border))
+                .px_2()
+                .xsmall()
+                .accessibility_label(label)
+                .tooltip(language.text("Choose archive"))
+                .disabled(busy)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .w_full()
+                        .min_w(px(0.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .text_xs()
+                                .truncate()
+                                .text_color(rgb(theme.muted_text))
+                                .child(path),
+                        )
+                        .child(crate::app_icon("archive", 14.0, theme.soft_accent())),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if choose_a {
+                        this.choose_comparison_archive_a(cx);
+                    } else {
+                        this.choose_comparison_archive_b(cx);
+                    }
+                }));
+            content = content.child(
+                div()
+                    .id(field)
+                    .debug_selector(|| field.to_owned())
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().text_xs().text_color(rgb(theme.muted_text)).child(label))
+                    .child(action),
+            );
+        }
+        if let Some(error) = error {
+            content = content.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(if theme.window < 0x808080 { 0xfca5a5 } else { 0xb91c1c }))
+                    .child(error),
+            );
+        }
+        if busy {
+            content = content.child(findings_skeleton(theme));
+        } else if let Some(report) = report {
+            let pane = manager.comparison_dialog.view.get_or_insert_with(|| {
+                cx.new(|_| ComparisonPane {
+                    report: report.clone(),
+                    scroll: gpui::UniformListScrollHandle::new(),
+                    filter: ComparisonFilter::All,
+                    language,
+                    theme,
+                })
+            });
+            pane.update(cx, |pane, cx| {
+                let changed = !Arc::ptr_eq(&pane.report, &report)
+                    || pane.language != language
+                    || pane.theme.surface != theme.surface;
+                if !Arc::ptr_eq(&pane.report, &report) {
+                    pane.report = report.clone();
+                    pane.scroll = gpui::UniformListScrollHandle::new();
+                    pane.filter = ComparisonFilter::All;
+                }
+                pane.language = language;
+                pane.theme = theme;
+                if changed {
+                    cx.notify();
+                }
+            });
+            content = content
+                .child(comparison_summary(&report, language, theme))
+                .child(
+                    div()
+                        .h((window.viewport_size().height - px(380.0)).min(px(420.0)).max(px(160.0)))
+                        .flex()
+                        .flex_col()
+                        .min_h(px(0.0))
+                        .child(pane.clone()),
+                );
+        }
+        content
+    }
+
+    pub(crate) fn comparison_footer(
+        manager: &ArchiveManager,
+        cx: &mut Context<ArchiveManager>,
+    ) -> impl IntoElement {
+        let language = manager.language;
+        let ready = manager
+            .comparison_dialog
+            .path_a
+            .as_ref()
+            .zip(manager.comparison_dialog.path_b.as_ref())
+            .is_some_and(|(path_a, path_b)| path_a != path_b);
+        let label = if manager.comparison_dialog.report.is_some() {
+            "Run comparison again"
+        } else {
+            "Start comparison"
+        };
+        let report = manager.comparison_dialog.report.clone();
+        div()
+            .id("comparison-actions")
+            .debug_selector(|| "comparison-actions".to_owned())
+            .flex()
+            .items_center()
+            .gap_2()
+            .when_some(report, |actions, report| {
+                actions.child(
+                    div()
+                        .id("comparison-report-actions")
+                        .debug_selector(|| "comparison-report-actions".to_owned())
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Button::new("copy-comparison-report")
+                                .debug_selector(|| "copy-comparison-report".to_owned())
+                                .ghost()
+                                .small()
+                                .icon(gpui::assets::IconName::Copy)
+                                .tooltip(language.text("Copy report"))
+                                .accessibility_label(language.text("Copy report"))
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    if let Ok(text) = serde_json::to_string_pretty(&report.json()) {
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                                    }
+                                })),
+                        )
+                        .child(
+                            Button::new("save-comparison-report")
+                                .debug_selector(|| "save-comparison-report".to_owned())
+                                .ghost()
+                                .small()
+                                .icon(gpui::assets::IconName::Save)
+                                .tooltip(language.text("Save report"))
+                                .accessibility_label(language.text("Save report"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.export_comparison_report(cx);
+                                })),
+                        ),
+                )
+            })
+            .child(div().flex_1())
+            .child(
+                Button::new("comparison-start")
+                    .debug_selector(|| "comparison-start".to_owned())
+                    .primary()
+                    .small()
+                    .label(language.text(label))
+                    .disabled(!ready || manager.comparison_dialog.is_busy())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.start_archive_comparison(cx);
+                    })),
+            )
+    }
 
 /// Renders the appropriate empty message before or after an audit.
 fn findings_empty_state(
@@ -2844,15 +3236,51 @@ fn comparison_row(
             }
         }
     }
-    details.extend(item.metadata.iter().map(|change| {
+    let metadata_details: Vec<_> = item.metadata.iter().map(|change| {
         format!(
             "{}: {} → {}",
             language.text(change.key),
             change.value_a.as_deref().unwrap_or("-"),
             change.value_b.as_deref().unwrap_or("-"),
         )
-    }));
-    let detail = details.join(" · ");
+    }).collect();
+    let metadata_count = metadata_details.len();
+    details.splice(0..0, metadata_details.into_iter().take(2));
+    let detail_count = details.len();
+    let visible_details: Vec<_> = details.into_iter().take(4).collect();
+    let more_details = detail_count
+        .saturating_sub(visible_details.len())
+        .saturating_add(metadata_count.saturating_sub(2));
+    let detail_chips = div()
+        .flex()
+        .flex_wrap()
+        .gap_1()
+        .max_h(px(38.0))
+        .overflow_hidden()
+        .children(visible_details.into_iter().map(|detail| {
+            div()
+                .max_w(px(300.0))
+                .h(px(18.0))
+                .px_1()
+                .rounded_sm()
+                .bg(rgb(theme.sidebar))
+                .text_xs()
+                .text_color(rgb(theme.muted_text))
+                .truncate()
+                .child(detail)
+        }))
+        .when(more_details > 0, |chips| {
+            chips.child(
+                div()
+                    .h(px(18.0))
+                    .px_1()
+                    .rounded_sm()
+                    .bg(rgb(theme.selection))
+                    .text_xs()
+                    .text_color(rgb(theme.muted_text))
+                    .child(format!("+{more_details} {}", language.text("More details"))),
+            )
+        });
     let scope = (!item.scope.is_empty()).then(|| item.scope.clone());
     let tone = if matches!(
         item.kind,
@@ -2871,11 +3299,12 @@ fn comparison_row(
         .flex()
         .flex_col()
         .justify_center()
-        .gap_1()
+        .gap_2()
         .w_full()
-        .h(px(96.0))
+        .h(px(132.0))
         .flex_shrink_0()
-        .px_2()
+        .px_3()
+        .py_2()
         .border_b_1()
         .border_color(rgb(theme.subtle_border))
         .child(
@@ -2885,59 +3314,56 @@ fn comparison_row(
                 .gap_2()
                 .child(
                     div()
-                        .w(px(6.0))
-                        .h(px(6.0))
-                        .rounded_full()
-                        .bg(rgb(tone)),
-                )
-                .child(
-                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(rgb(theme.selection))
                         .text_xs()
                         .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(rgb(tone))
                         .child(language.text(item.kind.label())),
                 )
                 .child(div().flex_1())
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(theme.muted_text))
-                        .truncate()
-                        .child(language.text_data(scope.as_deref().unwrap_or(""))),
-                ),
+                .when_some(scope, |header, scope| {
+                    header.child(
+                        div()
+                            .max_w(px(360.0))
+                            .text_xs()
+                            .text_color(rgb(theme.muted_text))
+                            .truncate()
+                            .child(language.text_data(&scope)),
+                    )
+                }),
         )
         .child(
             div()
                 .flex()
                 .gap_3()
-                .child(
-                    div()
-                        .flex()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .text_xs()
-                        .truncate()
-                        .child(format!("A: {path_a}")),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .text_xs()
-                        .truncate()
-                        .child(format!("B: {path_b}")),
-                ),
+                .child(comparison_path_cell("Archive A", path_a, language, theme))
+                .child(comparison_path_cell("Archive B", path_b, language, theme)),
         )
-        .when(!detail.is_empty(), |row| {
-            row.child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(theme.muted_text))
-                    .truncate()
-                    .child(detail),
-            )
-        })
+        .when(detail_count > 0, |row| row.child(detail_chips))
+}
+
+fn comparison_path_cell(
+    label: &'static str,
+    path: &str,
+    language: crate::i18n::Language,
+    theme: Theme,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w(px(0.0))
+        .gap_1()
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(theme.muted_text))
+                .child(language.text(label)),
+        )
+        .child(div().min_w(px(0.0)).text_sm().truncate().child(path.to_owned()))
 }
 
 fn hash_prefix(hash: Option<&str>) -> &str {
