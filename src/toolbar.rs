@@ -915,6 +915,7 @@ pub(crate) fn toolbox_bar(
             .dropdown_menu(move |menu, _, _| {
                 let view = audit_view.clone();
                 let audit_view = audit_view.clone();
+                let full_audit_view = audit_view.clone();
                 menu.min_w(px(240.0))
                     .item(
                         PopupMenuItem::new(language.text("Test integrity"))
@@ -941,6 +942,21 @@ pub(crate) fn toolbox_bar(
                                 let _ = audit_view.update(cx, |this, cx| {
                                     this.inspect_current(
                                         crate::inspection::InspectionMode::Audit,
+                                        window,
+                                        cx,
+                                    )
+                                });
+                            }),
+                    )
+                    .separator()
+                    .item(
+                        PopupMenuItem::new(language.text("Full audit"))
+                            .icon(spaced_icon(gpui::assets::IconName::ScanSearch))
+                            .disabled(!can_inspect)
+                            .on_click(move |_, window, cx| {
+                                let _ = full_audit_view.update(cx, |this, cx| {
+                                    this.inspect_current(
+                                        crate::inspection::InspectionMode::FullAudit,
                                         window,
                                         cx,
                                     )

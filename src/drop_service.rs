@@ -1,6 +1,6 @@
 //! Routes dropped filesystem paths to navigation, archive inspection, or creation.
 
-use crate::{ArchiveManager, Modal, Theme, archive, file_actions::EntryTarget, inspection::InspectionMode};
+use crate::{ArchiveManager, Modal, Theme, archive, file_actions::EntryTarget};
 use gpui::{Context, IntoElement, Render, Window, div, prelude::*, px, rgb};
 use std::path::{Path, PathBuf};
 
@@ -185,11 +185,11 @@ impl ArchiveManager {
             return;
         }
         if self.inspector.visible
-            && self.inspector.mode == InspectionMode::Audit
+            && self.inspector.mode.is_audit()
             && paths.iter().all(|path| path.is_file())
         {
             let sources = paths.iter().map(|path| (path.clone(), None)).collect();
-            self.inspect_sources(sources, InspectionMode::Audit, window, cx);
+            self.inspect_sources(sources, self.inspector.mode, window, cx);
             return;
         }
         if paths.len() == 1 {

@@ -44,6 +44,8 @@ use std::{
 const MAX_ENTRIES: usize = 20_000;
 const MAX_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_FINDINGS: usize = 500;
+const MAX_SEVENZIP_DICTIONARY_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Selects metadata preview, content verification, or security auditing.
@@ -54,6 +56,42 @@ pub enum InspectionMode {
     Integrity,
     /// Performs integrity checks and reports suspicious archive metadata and content.
     Audit,
+    /// Performs an audit without entry-count, entry-size, or total-read limits.
+    FullAudit,
+}
+
+impl InspectionMode {
+    pub(crate) fn is_audit(self) -> bool {
+        matches!(self, Self::Audit | Self::FullAudit)
+    }
+
+    pub(crate) fn is_full_audit(self) -> bool {
+        self == Self::FullAudit
+    }
+
+    fn max_entries(self) -> usize {
+        if self.is_full_audit() {
+            usize::MAX
+        } else {
+            MAX_ENTRIES
+        }
+    }
+
+    fn max_entry_bytes(self) -> u64 {
+        if self.is_full_audit() {
+            u64::MAX
+        } else {
+            MAX_ENTRY_BYTES
+        }
+    }
+
+    fn max_total_bytes(self) -> u64 {
+        if self.is_full_audit() {
+            u64::MAX
+        } else {
+            MAX_TOTAL_BYTES
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,6 +179,7 @@ pub struct Report {
     pub limited: bool,
     /// Top-level error encountered while inspecting the archive.
     pub error: Option<String>,
+    full_audit: bool,
 }
 
 impl Report {
@@ -159,7 +198,14 @@ impl Report {
                 "sha256": entry.sha256, "encrypted": entry.encrypted, "link": entry.link, "error": entry.error,
             })).collect::<Vec<_>>(),
             "findings": self.findings.iter().map(|finding| serde_json::json!({"kind": finding.kind, "entry": finding.entry, "detail": finding.detail})).collect::<Vec<_>>(),
-            "limits": { "max_entries": MAX_ENTRIES, "max_entry_bytes": MAX_ENTRY_BYTES, "max_total_bytes": MAX_TOTAL_BYTES },
+            "full_audit": self.full_audit,
+            "limits": {
+                "max_entries": (!self.full_audit).then_some(MAX_ENTRIES),
+                "max_entry_bytes": (!self.full_audit).then_some(MAX_ENTRY_BYTES),
+                "max_total_bytes": (!self.full_audit).then_some(MAX_TOTAL_BYTES),
+                "max_findings": (!self.full_audit).then_some(MAX_FINDINGS),
+                "max_sevenz_dictionary_bytes": MAX_SEVENZIP_DICTIONARY_BYTES,
+            },
         })
     }
     /// Sums reported uncompressed entry sizes without overflowing.
@@ -174,7 +220,7 @@ impl Report {
     }
     /// Adds a finding until the report's bounded finding limit is reached.
     fn finding(&mut self, kind: &'static str, entry: impl Into<String>, detail: impl Into<String>) {
-        if self.findings.len() < 500 {
+        if self.full_audit || self.findings.len() < MAX_FINDINGS {
             self.findings.push(Finding {
                 kind,
                 entry: entry.into(),
@@ -334,6 +380,7 @@ pub fn inspect(
         integrity: Integrity::NotTested,
         limited: false,
         error: None,
+        full_audit: mode.is_full_audit(),
     };
     if let Err(error) = inspect_inner(&mut report, password, mode, cancel) {
         if matches!(error.downcast_ref::<crate::xar::ReadError>(), Some(crate::xar::ReadError::Limit)) {
@@ -420,7 +467,7 @@ fn inspect_inner(
         "This format does not support archive inspection"
     );
     file.rewind()?;
-    if mode != InspectionMode::Preview && report.archive_size <= MAX_TOTAL_BYTES {
+    if mode != InspectionMode::Preview && report.archive_size <= mode.max_total_bytes() {
         let mut hash = Sha256::new();
         let mut buffer = [0_u8; 65536];
         loop {
@@ -434,13 +481,13 @@ fn inspect_inner(
         report.archive_sha256 = Some(format!("{:x}", hash.finalize()));
         file.rewind()?;
     }
-    let mut budget = MAX_TOTAL_BYTES;
+    let mut budget = mode.max_total_bytes();
     match format {
         ResolvedFormat::Cpio | ResolvedFormat::Ar | ResolvedFormat::Pax => {
             let mut reader = libarchive2::ReadArchive::open(&report.path)?;
             loop {
                 anyhow::ensure!(!cancel.load(Ordering::Relaxed), "Inspection cancelled");
-                if report.entries.len() >= MAX_ENTRIES { report.limited = true; break; }
+                if report.entries.len() >= mode.max_entries() { report.limited = true; break; }
                 let Some(entry) = reader.next_entry()? else { break; };
                 let regular = entry.file_type() == libarchive2::FileType::RegularFile;
                 let mut info = EntryInfo {
@@ -457,7 +504,7 @@ fn inspect_inner(
                         || (!regular && entry.file_type() != libarchive2::FileType::Directory),
                     error: None,
                 };
-                if info.size > MAX_ENTRY_BYTES || info.size > budget { report.limited = true; }
+                if info.size > mode.max_entry_bytes() || info.size > budget { report.limited = true; }
                 if !report.limited && regular && !info.link {
                     if mode == InspectionMode::Preview { budget -= info.size; }
                     else {
@@ -473,7 +520,7 @@ fn inspect_inner(
             let mut reader = crate::xar::XarReader::new(file)?;
             for entry in reader.entries.clone() {
                 anyhow::ensure!(!cancel.load(Ordering::Relaxed), "Inspection cancelled");
-                if report.entries.len() >= MAX_ENTRIES { report.limited = true; break; }
+                if report.entries.len() >= mode.max_entries() { report.limited = true; break; }
                 let mut info = EntryInfo {
                     name: entry.path.clone(),
                     directory: entry.file_type == xara::XarFileType::Directory,
@@ -485,7 +532,7 @@ fn inspect_inner(
                     link: entry.file_type == xara::XarFileType::Symlink || entry.link.is_some(),
                     error: None,
                 };
-                if info.size > MAX_ENTRY_BYTES || info.size > budget { report.limited = true; }
+                if info.size > mode.max_entry_bytes() || info.size > budget { report.limited = true; }
                 if !report.limited && !info.directory && !info.link {
                     if mode == InspectionMode::Preview { budget -= info.size; }
                     else {
@@ -500,7 +547,7 @@ fn inspect_inner(
         ResolvedFormat::Zip => {
             let mut archive = zip::ZipArchive::new(file)?;
             for index in 0..archive.len() {
-                if report.entries.len() >= MAX_ENTRIES {
+                if report.entries.len() >= mode.max_entries() {
                     report.limited = true;
                     break;
                 }
@@ -601,7 +648,7 @@ fn inspect_inner(
             let reader = archive::decode_archive_stream(file, format)?;
             let mut archive = tar::Archive::new(reader);
             for entry in archive.entries()? {
-                if report.entries.len() >= MAX_ENTRIES {
+                if report.entries.len() >= mode.max_entries() {
                     report.limited = true;
                     break;
                 }
@@ -648,7 +695,7 @@ fn inspect_inner(
                 report.entries.push(info);
                 if mode == InspectionMode::Preview {
                     let size = report.entries.last().unwrap().size;
-                    if size > MAX_ENTRY_BYTES || size > budget {
+                    if size > mode.max_entry_bytes() || size > budget {
                         report.limited = true;
                     } else {
                         budget -= size;
@@ -749,7 +796,7 @@ fn inspect_inner(
                 );
             }
             for (index, entry) in archive.archive().files.iter().enumerate() {
-                if report.entries.len() >= MAX_ENTRIES {
+                if report.entries.len() >= mode.max_entries() {
                     report.limited = true;
                     break;
                 }
@@ -797,7 +844,7 @@ fn inspect_inner(
                 } else {
                     let mut metadata = std::mem::take(&mut report.entries);
                     archive.for_each_entries(|entry, reader| {
-                        if report.entries.len() >= MAX_ENTRIES {
+                        if report.entries.len() >= mode.max_entries() {
                             report.limited = true;
                             return Ok(false);
                         }
@@ -857,7 +904,7 @@ fn inspect_rar(
     let mut index = 0_usize;
     loop {
         anyhow::ensure!(!cancel.load(Ordering::Relaxed), "Inspection cancelled");
-        if report.entries.len() >= MAX_ENTRIES {
+        if report.entries.len() >= mode.max_entries() {
             report.limited = true;
             break;
         }
@@ -889,7 +936,7 @@ fn inspect_rar(
             report.integrity = Integrity::PasswordRequired;
             archive = entry.skip().map_err(archive::map_rar_error)?;
         } else if mode != InspectionMode::Preview && !directory {
-            if size > MAX_ENTRY_BYTES || size > *budget {
+            if size > mode.max_entry_bytes() || size > *budget {
                 report.limited = true;
                 report.entries.push(info);
                 break;
@@ -909,7 +956,7 @@ fn inspect_rar(
             );
         } else {
             if mode == InspectionMode::Preview && !directory {
-                if size > MAX_ENTRY_BYTES || size > *budget {
+                if size > mode.max_entry_bytes() || size > *budget {
                     report.limited = true;
                 } else {
                     *budget -= size;
@@ -971,7 +1018,7 @@ fn read_entry(
     cancel: &AtomicBool,
     budget: &mut u64,
 ) {
-    if expected_size.is_some_and(|size| size > MAX_ENTRY_BYTES || size > *budget) {
+    if expected_size.is_some_and(|size| size > mode.max_entry_bytes() || size > *budget) {
         report.limited = true;
         return;
     }
@@ -988,7 +1035,7 @@ fn read_entry(
                 break;
             }
             total += count as u64;
-            if total > MAX_ENTRY_BYTES || count as u64 > *budget {
+            if total > mode.max_entry_bytes() || count as u64 > *budget {
                 report.limited = true;
                 anyhow::bail!("Inspection byte limit reached");
             }
@@ -1010,7 +1057,7 @@ fn read_entry(
         );
         info.sha256 = Some(format!("{:x}", sha.finalize()));
         info.size = total;
-        if mode == InspectionMode::Audit {
+        if mode.is_audit() {
             let detected = detect_format(&prefix);
             if detected.is_some() || expected_format(Path::new(&info.name)).is_some() {
                 report.finding(
@@ -1069,7 +1116,7 @@ fn audit_metadata(report: &mut Report, mode: InspectionMode) {
         if let Some(error) = &info.error {
             report.finding("Damaged entry", &info.name, error);
         }
-        if mode != InspectionMode::Audit {
+        if !mode.is_audit() {
             continue;
         }
         let normalized = info.name.replace('\\', "/");
@@ -1310,20 +1357,51 @@ mod tests {
     /// Confirms the bundled audit fixture produces multiple finding categories.
     fn bundled_audit_sample_covers_multiple_finding_kinds() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/14-audit-findings.zip");
-        let report = inspect(&path, None, InspectionMode::Audit, &AtomicBool::new(false));
-        assert_eq!(report.integrity, Integrity::Passed);
-        for kind in [
-            "Unsafe path",
-            "Duplicate name",
-            "Duplicate content",
-            "Nested archive",
-            "Format mismatch",
-        ] {
-            assert!(
-                report.findings.iter().any(|finding| finding.kind == kind),
-                "missing {kind}"
+        for mode in [InspectionMode::Audit, InspectionMode::FullAudit] {
+            let report = inspect(&path, None, mode, &AtomicBool::new(false));
+            assert_eq!(report.integrity, Integrity::Passed);
+            assert_eq!(report.full_audit, mode.is_full_audit());
+            for kind in [
+                "Unsafe path",
+                "Duplicate name",
+                "Duplicate content",
+                "Nested archive",
+                "Format mismatch",
+            ] {
+                assert!(
+                    report.findings.iter().any(|finding| finding.kind == kind),
+                    "missing {kind}"
+                );
+            }
+            assert_eq!(
+                report.json()["limits"]["max_entries"].is_null(),
+                mode.is_full_audit()
             );
         }
+    }
+
+    #[test]
+    fn full_audit_removes_scan_and_finding_limits() {
+        assert_eq!(InspectionMode::Audit.max_entries(), MAX_ENTRIES);
+        assert_eq!(InspectionMode::Audit.max_entry_bytes(), MAX_ENTRY_BYTES);
+        assert_eq!(InspectionMode::Audit.max_total_bytes(), MAX_TOTAL_BYTES);
+        assert_eq!(InspectionMode::FullAudit.max_entries(), usize::MAX);
+        assert_eq!(InspectionMode::FullAudit.max_entry_bytes(), u64::MAX);
+        assert_eq!(InspectionMode::FullAudit.max_total_bytes(), u64::MAX);
+
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/14-audit-findings.zip");
+        let mut bounded = inspect(&path, None, InspectionMode::Audit, &AtomicBool::new(false));
+        let mut full = inspect(&path, None, InspectionMode::FullAudit, &AtomicBool::new(false));
+        bounded.findings.clear();
+        full.findings.clear();
+        for _ in 0..=MAX_FINDINGS {
+            bounded.finding("Test", "", "finding");
+            full.finding("Test", "", "finding");
+        }
+        assert_eq!(bounded.findings.len(), MAX_FINDINGS);
+        assert!(bounded.limited);
+        assert_eq!(full.findings.len(), MAX_FINDINGS + 1);
+        assert!(!full.limited);
     }
 
     #[test]
@@ -1445,7 +1523,12 @@ mod tests {
             crate::archive::create_archive(&path, std::slice::from_ref(&source), crate::archive::CreateOptions {
                 format, compression: format.compression_levels()[0], ..crate::archive::CreateOptions::default()
             }).unwrap();
-            for mode in [InspectionMode::Preview, InspectionMode::Integrity, InspectionMode::Audit] {
+            for mode in [
+                InspectionMode::Preview,
+                InspectionMode::Integrity,
+                InspectionMode::Audit,
+                InspectionMode::FullAudit,
+            ] {
                 let report = inspect(&path, None, mode, &AtomicBool::new(false));
                 assert_eq!(report.detected, Some(format), "{format:?}");
                 assert!(report.error.is_none(), "{format:?}: {:?}", report.error);
