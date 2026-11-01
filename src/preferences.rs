@@ -146,6 +146,9 @@ impl UserPreferences {
             language: match value.get("language").and_then(serde_json::Value::as_str) {
                 Some("pl") => Language::Polish,
                 Some("zh-CN") => Language::ChineseSimplified,
+                Some("es") => Language::Spanish,
+                Some("ja") => Language::Japanese,
+                Some("de") => Language::German,
                 _ => Language::English,
             },
             theme_mode: match value.get("theme").and_then(serde_json::Value::as_str) {
@@ -246,15 +249,17 @@ mod tests {
         let location = directory.path().join("startup");
         std::fs::create_dir(&location).unwrap();
         let path = directory.path().join("config/settings.json");
-        let preferences = UserPreferences {
-            language: crate::i18n::Language::ChineseSimplified,
-            theme_mode: ThemeMode::Dark,
-            accent_color: AccentColor::Rose,
-            default_location: Some(location),
-            auto_calculate_folder_sizes: false,
-        };
-        preferences.save(&path).unwrap();
-        assert_eq!(UserPreferences::load(&path), preferences);
+        for language in crate::i18n::Language::ALL {
+            let preferences = UserPreferences {
+                language,
+                theme_mode: ThemeMode::Dark,
+                accent_color: AccentColor::Rose,
+                default_location: Some(location.clone()),
+                auto_calculate_folder_sizes: false,
+            };
+            preferences.save(&path).unwrap();
+            assert_eq!(UserPreferences::load(&path), preferences);
+        }
     }
 
     #[test]
