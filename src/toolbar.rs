@@ -916,6 +916,7 @@ pub(crate) fn toolbox_bar(
                 let view = audit_view.clone();
                 let audit_view = audit_view.clone();
                 let full_audit_view = audit_view.clone();
+                let compare_view = audit_view.clone();
                 menu.min_w(px(240.0))
                     .item(
                         PopupMenuItem::new(language.text("Test integrity"))
@@ -960,6 +961,16 @@ pub(crate) fn toolbox_bar(
                                         window,
                                         cx,
                                     )
+                                });
+                            }),
+                    )
+                    .separator()
+                    .item(
+                        PopupMenuItem::new(language.text("Compare archives"))
+                            .icon(spaced_icon(gpui::assets::IconName::GitCompare))
+                            .on_click(move |_, window, cx| {
+                                let _ = compare_view.update(cx, |this, cx| {
+                                    this.choose_archives_for_comparison(window, cx);
                                 });
                             }),
                     )

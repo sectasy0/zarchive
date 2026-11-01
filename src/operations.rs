@@ -545,6 +545,8 @@ mod tests {
             ("toolbar-extract-dropdown", "Extract to..."),
             ("toolbar-inspect-dropdown", "Test integrity"),
             ("toolbar-inspect-dropdown", "Audit archive"),
+            ("toolbar-inspect-dropdown", "Full audit"),
+            ("toolbar-inspect-dropdown", "Compare archives"),
         ] {
             assert!(toolbar_menu_contains(cx, trigger, item));
         }

@@ -2,6 +2,7 @@ mod archive;
 mod xar;
 mod blur;
 mod browser;
+mod comparison;
 mod creation;
 mod dialogs;
 mod drop_service;

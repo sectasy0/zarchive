@@ -126,6 +126,16 @@ pub struct EntryInfo {
     pub modified: Option<String>,
     /// Platform attributes, when available.
     pub attributes: Option<String>,
+    /// Numeric owner identifier, when the format records one.
+    pub owner_id: Option<u64>,
+    /// Numeric group identifier, when the format records one.
+    pub group_id: Option<u64>,
+    /// Entry comment, when the format records one.
+    pub comment: Option<String>,
+    /// Encoded format-specific extra fields, when available.
+    pub extra_fields: Option<String>,
+    /// Link target, when the format records one.
+    pub link_target: Option<String>,
     /// CRC stored in the archive, when present and meaningful.
     pub stored_crc: Option<u32>,
     /// CRC computed while reading the entry.
@@ -194,6 +204,8 @@ impl Report {
             "entries": self.entries.iter().map(|entry| serde_json::json!({
                 "name": entry.name, "directory": entry.directory, "size": entry.size, "compressed_size": entry.compressed_size,
                 "method": entry.method, "modified": entry.modified, "attributes": entry.attributes,
+                "owner_id": entry.owner_id, "group_id": entry.group_id, "comment": entry.comment,
+                "extra_fields": entry.extra_fields, "link_target": entry.link_target,
                 "stored_crc32": entry.stored_crc.map(|crc| format!("{crc:08x}")), "computed_crc32": entry.computed_crc.map(|crc| format!("{crc:08x}")),
                 "sha256": entry.sha256, "encrypted": entry.encrypted, "link": entry.link, "error": entry.error,
             })).collect::<Vec<_>>(),
@@ -498,6 +510,8 @@ fn inspect_inner(
                     method: "Stored".into(),
                     modified: entry.mtime().map(format_system_time),
                     attributes: Some(format!("{:o}", entry.mode())),
+                    owner_id: None, group_id: None, comment: None, extra_fields: None,
+                    link_target: entry.symlink().or_else(|| entry.hardlink()),
                     stored_crc: None, computed_crc: None, sha256: None,
                     encrypted: entry.is_encrypted(),
                     link: entry.symlink().is_some() || entry.hardlink().is_some()
@@ -528,6 +542,8 @@ fn inspect_inner(
                     compressed_size: entry.data.as_ref().map(|data| data.length),
                     method: entry.data.as_ref().map_or_else(|| "Stored".into(), |data| data.encoding.clone()),
                     modified: None, attributes: None, stored_crc: None, computed_crc: None,
+                    owner_id: None, group_id: None, comment: None, extra_fields: None,
+                    link_target: entry.link.clone(),
                     sha256: None, encrypted: false,
                     link: entry.file_type == xara::XarFileType::Symlink || entry.link.is_some(),
                     error: None,
@@ -564,6 +580,13 @@ fn inspect_inner(
                     method: format!("{:?}", raw.compression()),
                     modified: raw.last_modified().map(|value| value.to_string()),
                     attributes: raw.unix_mode().map(|mode| format!("{mode:o}")),
+                    owner_id: None,
+                    group_id: None,
+                    comment: (!raw.comment().is_empty()).then(|| raw.comment().to_owned()),
+                    extra_fields: raw.extra_data().map(|bytes| {
+                        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+                    }),
+                    link_target: None,
                     stored_crc: (!raw.encrypted() || raw.crc32() != 0).then_some(raw.crc32()),
                     computed_crc: None,
                     sha256: None,
@@ -622,6 +645,11 @@ fn inspect_inner(
                 method: format.label().to_owned(),
                 modified: None,
                 attributes: None,
+                owner_id: None,
+                group_id: None,
+                comment: None,
+                extra_fields: None,
+                link_target: None,
                 stored_crc: None,
                 computed_crc: None,
                 sha256: None,
@@ -673,6 +701,11 @@ fn inspect_inner(
                     .into(),
                     modified: header.mtime().ok().map(|value| format!("Unix {value}")),
                     attributes: header.mode().ok().map(|mode| format!("{mode:o}")),
+                    owner_id: header.uid().ok(),
+                    group_id: header.gid().ok(),
+                    comment: None,
+                    extra_fields: None,
+                    link_target: header.link_name().ok().flatten().map(|path| path.to_string_lossy().into_owned()),
                     stored_crc: None,
                     computed_crc: None,
                     sha256: None,
@@ -825,6 +858,11 @@ fn inspect_inner(
                     attributes: entry
                         .has_windows_attributes
                         .then(|| format!("{:x}", entry.windows_attributes)),
+                    owner_id: None,
+                    group_id: None,
+                    comment: None,
+                    extra_fields: None,
+                    link_target: None,
                     stored_crc: entry.has_crc.then_some(entry.crc as u32),
                     computed_crc: None,
                     sha256: None,
@@ -925,6 +963,11 @@ fn inspect_rar(
             method: format!("RAR method {}", header.method),
             modified: None,
             attributes: Some(format!("{file_attr:o}")),
+            owner_id: None,
+            group_id: None,
+            comment: None,
+            extra_fields: None,
+            link_target: None,
             stored_crc: Some(header.file_crc),
             computed_crc: None,
             sha256: None,
