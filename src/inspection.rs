@@ -177,6 +177,18 @@ pub struct Report {
     pub created: Option<String>,
     /// Archive modification timestamp, when available.
     pub modified: Option<String>,
+    /// Last access timestamp from the filesystem, when available.
+    pub accessed: Option<String>,
+    /// Filesystem permission bits or a read-only summary.
+    pub filesystem_permissions: Option<String>,
+    /// Whether the archive file is read-only on the filesystem.
+    pub filesystem_readonly: Option<bool>,
+    /// Numeric filesystem owner identifier on Unix.
+    pub filesystem_owner_id: Option<u32>,
+    /// Numeric filesystem group identifier on Unix.
+    pub filesystem_group_id: Option<u32>,
+    /// Container-level comment, when the format provides one.
+    pub archive_comment: Option<String>,
     /// SHA-256 of the archive file, when calculated.
     pub archive_sha256: Option<String>,
     /// Metadata and verification results for each inspected entry.
@@ -198,6 +210,9 @@ impl Report {
         serde_json::json!({
             "path": self.path, "detected_format": self.signature, "expected_format": self.expected.map(|format| format.label()),
             "archive_size": self.archive_size, "created": self.created, "modified": self.modified,
+            "accessed": self.accessed, "filesystem_permissions": self.filesystem_permissions,
+            "filesystem_readonly": self.filesystem_readonly, "filesystem_owner_id": self.filesystem_owner_id,
+            "filesystem_group_id": self.filesystem_group_id, "archive_comment": self.archive_comment,
             "uncompressed_size": self.unpacked_size(), "compression_ratio": self.ratio(),
             "compression_level": null, "archive_sha256": self.archive_sha256,
             "integrity": format!("{:?}", self.integrity), "limited": self.limited, "error": self.error,
@@ -386,6 +401,12 @@ pub fn inspect(
         archive_size: 0,
         created: None,
         modified: None,
+        accessed: None,
+        filesystem_permissions: None,
+        filesystem_readonly: None,
+        filesystem_owner_id: None,
+        filesystem_group_id: None,
+        archive_comment: None,
         archive_sha256: None,
         entries: Vec::new(),
         findings: Vec::new(),
@@ -429,6 +450,15 @@ fn inspect_inner(
     report.archive_size = metadata.len();
     report.created = metadata.created().ok().map(format_system_time);
     report.modified = metadata.modified().ok().map(format_system_time);
+    report.accessed = metadata.accessed().ok().map(format_system_time);
+    report.filesystem_permissions = filesystem_permissions(&metadata);
+    report.filesystem_readonly = Some(metadata.permissions().readonly());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        report.filesystem_owner_id = Some(metadata.uid());
+        report.filesystem_group_id = Some(metadata.gid());
+    }
     let mut file = CancellableReader {
         inner: file,
         cancel,
@@ -562,6 +592,8 @@ fn inspect_inner(
         }
         ResolvedFormat::Zip => {
             let mut archive = zip::ZipArchive::new(file)?;
+            report.archive_comment = (!archive.comment().is_empty())
+                .then(|| String::from_utf8_lossy(archive.comment()).into_owned());
             for index in 0..archive.len() {
                 if report.entries.len() >= mode.max_entries() {
                     report.limited = true;
@@ -1023,6 +1055,22 @@ fn format_system_time(time: std::time::SystemTime) -> String {
         .to_string()
 }
 
+fn filesystem_permissions(metadata: &std::fs::Metadata) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        Some(format!("{:04o}", metadata.permissions().mode() & 0o7777))
+    }
+    #[cfg(not(unix))]
+    {
+        Some(if metadata.permissions().readonly() {
+            "Read-only".into()
+        } else {
+            "Read/write".into()
+        })
+    }
+}
+
 /// Counts a preview stream without computing integrity hashes, respecting inspection limits.
 fn measure_entry(
     mut reader: impl Read,
@@ -1322,10 +1370,20 @@ mod tests {
                 .all(|entry| entry.computed_crc == entry.stored_crc)
         );
         assert!(report.archive_sha256.is_some());
+        assert!(report.filesystem_permissions.is_some());
+        assert_eq!(report.filesystem_readonly, Some(false));
+        assert!(report.accessed.is_some());
+        #[cfg(unix)]
+        {
+            assert!(report.filesystem_owner_id.is_some());
+            assert!(report.filesystem_group_id.is_some());
+        }
         let json = report.json();
         assert_eq!(json["detected_format"], "ZIP");
         assert!(report.modified.is_some());
         assert!(json["modified"].as_str().is_some());
+        assert!(json["filesystem_permissions"].as_str().is_some());
+        assert_eq!(json["filesystem_readonly"], false);
         assert!(json["entries"][0]["sha256"].as_str().is_some());
         assert!(json["compression_level"].is_null());
         let renamed = root.path().join("data.tar");

@@ -551,6 +551,8 @@ impl ArchiveManager {
 /// Renders one label/value pair in the inspection overview.
 fn detail(label: &'static str, value: String, theme: Theme) -> impl IntoElement {
     div()
+        .id("archive-metadata-overview")
+        .debug_selector(|| "archive-metadata-overview".to_owned())
         .flex()
         .flex_col()
         .gap_1()
@@ -566,6 +568,199 @@ fn detail(label: &'static str, value: String, theme: Theme) -> impl IntoElement 
                 .child(label),
         )
         .child(div().text_sm().min_w(px(0.0)).truncate().child(value))
+}
+
+fn archive_metadata_overview(
+    report: &Report,
+    language: crate::i18n::Language,
+    theme: Theme,
+) -> impl IntoElement {
+    let accessed = report
+        .accessed
+        .clone()
+        .unwrap_or_else(|| "-".to_owned());
+    let permissions = report
+        .filesystem_permissions
+        .clone()
+        .unwrap_or_else(|| "-".to_owned());
+    let readonly = report.filesystem_readonly.map_or_else(
+        || "-".to_owned(),
+        |readonly| language.text(if readonly { "Read-only" } else { "Read/write" }).to_owned(),
+    );
+    let filesystem_owner = match (report.filesystem_owner_id, report.filesystem_group_id) {
+        (Some(owner), Some(group)) => format!("UID {owner} / GID {group}"),
+        (Some(owner), None) => format!("UID {owner}"),
+        (None, Some(group)) => format!("GID {group}"),
+        (None, None) => "-".to_owned(),
+    };
+    let permission_entries = report
+        .entries
+        .iter()
+        .filter(|entry| entry.attributes.is_some())
+        .count();
+    let ownership_entries = report
+        .entries
+        .iter()
+        .filter(|entry| entry.owner_id.is_some() || entry.group_id.is_some())
+        .count();
+    let links = report.entries.iter().filter(|entry| entry.link).count();
+    let comments = report.entries.iter().filter(|entry| entry.comment.is_some()).count();
+    let extra_fields = report
+        .entries
+        .iter()
+        .filter(|entry| entry.extra_fields.is_some())
+        .count();
+    let mut compression_methods = std::collections::BTreeMap::<String, usize>::new();
+    for entry in report.entries.iter().filter(|entry| !entry.directory) {
+        *compression_methods.entry(entry.method.clone()).or_default() += 1;
+    }
+    let compression_methods = if compression_methods.is_empty() {
+        "-".to_owned()
+    } else {
+        compression_methods
+            .iter()
+            .map(|(method, count)| {
+                format!("{} × {count}", language.text_data(method))
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let archive_comment = report
+        .archive_comment
+        .as_deref()
+        .unwrap_or("-")
+        .to_owned();
+    let entry_count = report.entries.len();
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .pt_2()
+                .text_sm()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(language.text("Archive file")),
+        )
+        .child(
+            div()
+                .flex()
+                .gap_4()
+                .child(detail(
+                    language.text("Filesystem permissions"),
+                    permissions,
+                    theme,
+                ))
+                .child(detail(language.text("Filesystem state"), readonly, theme)),
+        )
+        .child(
+            div()
+                .flex()
+                .gap_4()
+                .child(detail(language.text("Owner/group"), filesystem_owner, theme))
+                .child(detail(language.text("Accessed"), accessed, theme)),
+        )
+        .child(
+            div()
+                .flex()
+                .gap_4()
+                .child(detail(
+                    language.text("Archive comment"),
+                    archive_comment,
+                    theme,
+                ))
+                .child(detail(
+                    language.text("Integrity"),
+                    language
+                        .text_data(&format!("{:?}", report.integrity))
+                        .to_owned(),
+                    theme,
+                )),
+        )
+        .child(
+            div()
+                .pt_2()
+                .text_sm()
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .child(language.text("Entry metadata")),
+        )
+        .child(
+            div()
+                .flex()
+                .gap_4()
+                .child(detail(
+                    language.text("Files"),
+                    report
+                        .entries
+                        .iter()
+                        .filter(|entry| !entry.directory)
+                        .count()
+                        .to_string(),
+                    theme,
+                ))
+                .child(detail(
+                    language.text("Directories"),
+                    report
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.directory)
+                        .count()
+                        .to_string(),
+                    theme,
+                )),
+        )
+        .child(
+            div()
+                .flex()
+                .gap_4()
+                .child(detail(
+                    language.text("Entries with permissions"),
+                    format!("{permission_entries} / {entry_count}"),
+                    theme,
+                ))
+                .child(detail(
+                    language.text("Entries with owner/group"),
+                    format!("{ownership_entries} / {entry_count}"),
+                    theme,
+                )),
+        )
+        .child(
+            div()
+                .flex()
+                .gap_4()
+                .child(detail(language.text("Links"), links.to_string(), theme))
+                .child(detail(
+                    language.text("Encrypted entries"),
+                    report
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.encrypted)
+                        .count()
+                        .to_string(),
+                    theme,
+                )),
+        )
+        .child(
+            div()
+                .flex()
+                .gap_4()
+                .child(detail(
+                    language.text("Entry comments"),
+                    comments.to_string(),
+                    theme,
+                ))
+                .child(detail(
+                    language.text("Extra fields"),
+                    extra_fields.to_string(),
+                    theme,
+                )),
+        )
+        .child(detail(
+            language.text("Compression methods"),
+            compression_methods,
+            theme,
+        ))
 }
 
 /// Returns the archive filename, falling back to the full path when needed.
@@ -992,6 +1187,37 @@ mod tests {
         assert_eq!(bundle["batch_limited"], false);
         assert_eq!(bundle["reports"][0]["full_audit"], true);
         assert_eq!(bundle["reports"][0]["limits"]["max_entries"], serde_json::Value::Null);
+    }
+
+    #[gpui::test]
+    fn overview_renders_archive_and_entry_metadata(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("notes.txt");
+        let path = directory.path().join("archive.zip");
+        std::fs::write(&source, b"overview metadata").unwrap();
+        crate::archive::create_archive(
+            &path,
+            std::slice::from_ref(&source),
+            crate::archive::CreateOptions::default(),
+        )
+        .unwrap();
+        let report = Arc::new(inspection::inspect(
+            &path,
+            None,
+            InspectionMode::Audit,
+            &AtomicBool::new(false),
+        ));
+        let (view, cx) = crate::tests::component_window(cx, |_, cx| {
+            let mut manager = crate::tests::test_manager(cx);
+            manager.inspector.visible = true;
+            manager.inspector.tab = InspectorTab::Overview;
+            manager.inspector.reports = vec![report];
+            manager
+        });
+        assert!(cx.debug_bounds("archive-metadata-overview").is_some());
+        assert!(cx.read(|cx| view.read(cx).inspector.reports[0]
+            .filesystem_permissions
+            .is_some()));
     }
 
     #[gpui::test]
@@ -2125,7 +2351,8 @@ pub fn view(
                     );
                 body = body
                     .child(inspection_notice(report, language, theme, cx))
-                    .child(metadata);
+                    .child(metadata)
+                    .child(archive_metadata_overview(report, language, theme));
                 if report.detected == Some(crate::archive::ResolvedFormat::Tar) {
                     body = body.child(div().text_xs().text_color(rgb(theme.muted_text)).child(
                         language.text("TAR stores header checksums, not file content checksums"),
