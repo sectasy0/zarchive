@@ -158,6 +158,7 @@ pub(crate) fn visible_entries(
             size: if !entry.is_directory { entry.size } else { 0 },
             modified: is_direct_child.then_some(entry.modified).flatten(),
             is_directory,
+            is_encrypted: is_direct_child && entry.is_encrypted,
         };
 
         children
@@ -214,6 +215,7 @@ pub(crate) fn search_archive_entries(
             size: entry.size,
             modified: entry.modified,
             is_directory: entry.is_directory,
+            is_encrypted: entry.is_encrypted,
         })
     }).collect()
 }
@@ -346,13 +348,15 @@ pub(crate) fn read_directory(path: &Path) -> anyhow::Result<Vec<ArchiveEntry>> {
         let metadata = entry
             .metadata()
             .with_context(|| format!("Failed to inspect {}", entry_path.display()))?;
+        let is_directory = metadata.is_dir();
         entries.push(ArchiveEntry {
             name: entry.file_name().to_string_lossy().into_owned(),
             source_path: Some(entry_path.to_string_lossy().into_owned()),
-            size: if metadata.is_dir() { 0 } else { metadata.len() },
+            size: if is_directory { 0 } else { metadata.len() },
             modified: metadata.modified().ok()
                 .map(|time| chrono::DateTime::<chrono::Local>::from(time).date_naive()),
-            is_directory: metadata.is_dir(),
+            is_directory,
+            is_encrypted: !is_directory && crate::archive::is_password_protected(&entry_path),
         });
     }
 
@@ -432,6 +436,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn directory_listing_marks_password_protected_zip_and_seven_zip_archives() {
+        use crate::archive::{
+            CompressionLevel, CreateOptions, ResolvedFormat, create_archive,
+            create_archive_with_password,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("secret.txt");
+        std::fs::write(&source, b"protected data").unwrap();
+        for format in [ResolvedFormat::Zip, ResolvedFormat::SevenZip] {
+            let protected = directory.path().join(format!("protected.{}", format.extension()));
+            let unprotected = directory.path().join(format!("plain.{}", format.extension()));
+            let options = CreateOptions {
+                format,
+                compression: CompressionLevel::Fast,
+                dictionary_mib: 1,
+                ..CreateOptions::default()
+            };
+            create_archive_with_password(
+                &protected,
+                std::slice::from_ref(&source),
+                options,
+                Some("icon-test-password"),
+            )
+            .unwrap();
+            create_archive(&unprotected, std::slice::from_ref(&source), options).unwrap();
+            let entries = read_directory(directory.path()).unwrap();
+            assert!(entries.iter().find(|entry| entry.name == protected.file_name().unwrap().to_string_lossy())
+                .unwrap().is_encrypted);
+            assert!(!entries.iter().find(|entry| entry.name == unprotected.file_name().unwrap().to_string_lossy())
+                .unwrap().is_encrypted);
+        }
+    }
+
     /// Builds a minimal archive entry for browser projection and sorting tests.
     fn entry(name: &str, size: u64, is_directory: bool) -> ArchiveEntry {
         ArchiveEntry {
@@ -440,6 +478,7 @@ mod tests {
             size,
             is_directory,
             modified: None,
+            is_encrypted: false,
         }
     }
 

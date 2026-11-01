@@ -39,6 +39,7 @@ fn search_directory_archives(
             let candidate = crate::archive::ArchiveEntry {
                 name: info.name.clone(), source_path: None, size: info.size,
                 is_directory: false, modified,
+                is_encrypted: info.encrypted,
             };
             if !parsed.criteria.matches(&candidate, Some(info.size), modified) { continue; }
             let key = serde_json::to_string(&(path.as_path(), &info.name)).expect("archive search key is serializable");
@@ -49,6 +50,7 @@ fn search_directory_archives(
                     name: format!("{}/{}", entry.name, info.name),
                     source_path: Some(key.clone()), size: info.size, is_directory: false,
                     modified: info.modified.as_deref().and_then(crate::browser::parse_modification_date),
+                    is_encrypted: info.encrypted,
                 },
                 target: crate::file_actions::EntryTarget {
                     name, key, path: path.clone(), archive_entry: Some(info.name), password: None, is_directory: false,
@@ -845,7 +847,7 @@ pub(crate) fn toolbox_bar(
                     .item(
                         PopupMenuItem::new(language.text("Open archive..."))
                             .icon(spaced_icon(
-                                gpui::component::Icon::default().path("icons/folder-open-menu.svg"),
+                                gpui::component::Icon::default().path("icons/folder-open.svg"),
                             ))
                             .action(Box::new(key_actions::OpenFile))
                             .on_click(move |_, _, cx| {

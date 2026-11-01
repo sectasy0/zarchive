@@ -1640,7 +1640,7 @@ fn file_row(
             .rsplit_once('.')
             .map(|(_, extension)| extension.to_ascii_uppercase())
             .unwrap_or_default();
-        (file_icon(&extension), extension)
+        (entry_icon(entry), extension)
     };
 
     let entry_name = entry.source_path.clone().unwrap_or_else(|| {
@@ -1803,11 +1803,26 @@ fn file_icon(extension: &str) -> &'static str {
         "mp4" | "mov" | "mkv" | "avi" | "webm" => "video",
         "rs" | "c" | "h" | "cpp" | "py" | "js" | "ts" | "go" | "java" | "html" | "css" => "code",
         "txt" | "md" | "rtf" | "doc" | "docx" | "odt" => "document",
-        "xls" | "xlsx" | "csv" | "ods" => "table",
+        "csv" => "csv",
+        "xls" | "xlsx" | "ods" => "table",
         "ppt" | "pptx" | "odp" => "presentation",
         "bin" | "dat" | "exe" | "dll" | "so" | "dylib" | "class" | "o" | "obj"
         | "wasm" | "db" | "sqlite" | "sqlite3" | "iso" => "binary",
         _ => "file",
+    }
+}
+
+fn entry_icon(entry: &ArchiveEntry) -> &'static str {
+    let extension = entry
+        .name
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_uppercase())
+        .unwrap_or_default();
+    let icon = file_icon(&extension);
+    if entry.is_encrypted && icon == "archive" {
+        "archive-locked"
+    } else {
+        icon
     }
 }
 
@@ -1823,8 +1838,8 @@ fn app_icon(name: &str, size: f32, color: u32) -> impl IntoElement {
 /// Returns the width-to-height ratio used to preserve an icon's source proportions.
 fn icon_aspect_ratio(name: &str) -> f32 {
     match name {
-        "arrow-down" | "arrow-up" | "document"  | "image" | "csv" | "audio"
-        | "video" | "code" | "file" | "archive" => 0.75,
+        "arrow-down" | "arrow-up" | "document"  | "image" | "audio"
+        | "video" | "code" | "file" | "archive" | "archive-locked" => 0.75,
         "arrow-left" | "documents" => 0.875,
         "chevron-left" => 0.625,
         "home" => 1.125,
@@ -2050,7 +2065,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArchiveEntry, SortColumn, file_icon, icon_aspect_ratio, sort_entries, visible_entries,
+        ArchiveEntry, SortColumn, entry_icon, file_icon, icon_aspect_ratio, sort_entries,
+        visible_entries,
     };
 
     #[gpui::test]
@@ -2114,6 +2130,7 @@ mod tests {
             size,
             is_directory,
             modified: None,
+            is_encrypted: false,
         }
     }
 
@@ -2798,6 +2815,7 @@ mod tests {
     fn selects_meaningful_icons_for_common_file_types() {
         assert_eq!(file_icon("pdf"), "pdf");
         assert_eq!(file_icon("PNG"), "image");
+        assert_eq!(file_icon("csv"), "csv");
         assert_eq!(file_icon("zip"), "archive");
         for extension in ["bz2", "tbz", "tbz2", "xz", "txz", "zst", "lz4", "lz", "br"] {
             assert_eq!(file_icon(extension), "archive");
@@ -2809,6 +2827,24 @@ mod tests {
             assert_eq!(file_icon(extension), "binary");
         }
         assert_eq!(file_icon("unknown"), "file");
+        let protected_archive = ArchiveEntry {
+            name: "secret.zip".into(),
+            source_path: None,
+            size: 0,
+            modified: None,
+            is_directory: false,
+            is_encrypted: true,
+        };
+        assert_eq!(entry_icon(&protected_archive), "archive-locked");
+        let csv = ArchiveEntry {
+            name: "data.csv".into(),
+            source_path: None,
+            size: 0,
+            modified: None,
+            is_directory: false,
+            is_encrypted: false,
+        };
+        assert_eq!(entry_icon(&csv), "csv");
     }
 
     #[test]
@@ -2819,6 +2855,8 @@ mod tests {
         assert_eq!(icon_aspect_ratio("code"), 0.75);
         assert_eq!(icon_aspect_ratio("folder"), 1.0);
         assert_eq!(icon_aspect_ratio("binary"), 1.0);
+        assert_eq!(icon_aspect_ratio("csv"), 0.75);
+        assert_eq!(icon_aspect_ratio("archive-locked"), 0.75);
         assert_eq!(icon_aspect_ratio("chevron-left"), 0.625);
         assert_eq!(icon_aspect_ratio("chevron-up"), 1.0);
         assert_eq!(icon_aspect_ratio("chevron-down"), 1.0);

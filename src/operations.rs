@@ -706,6 +706,7 @@ mod tests {
                     size: 5,
                     is_directory: false,
                     modified: None,
+                    is_encrypted: false,
                 },
                 ArchiveEntry {
                     name: "archive.zip".into(),
@@ -713,6 +714,7 @@ mod tests {
                     size: 100,
                     is_directory: false,
                     modified: None,
+                    is_encrypted: false,
                 },
             ];
             manager
@@ -841,6 +843,7 @@ mod tests {
                 size: 100,
                 is_directory: false,
                 modified: None,
+                is_encrypted: false,
             }];
             manager
         });

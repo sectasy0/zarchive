@@ -481,6 +481,8 @@ impl Render for Preview {
                     .border_color(rgb(theme.border))
                     .child(if self.hex.is_some() {
                         crate::app_icon("binary", 14.0, theme.accent).into_any_element()
+                    } else if self.csv.is_some() {
+                        crate::app_icon("csv", 14.0, theme.accent).into_any_element()
                     } else {
                         gpui::component::Icon::new(gpui::assets::IconName::FileText)
                             .size(px(14.0))

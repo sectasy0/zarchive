@@ -26,6 +26,8 @@ pub struct ArchiveEntry {
     pub modified: Option<chrono::NaiveDate>,
     /// Whether this entry represents a directory.
     pub is_directory: bool,
+    /// Whether this entry is encrypted or is a password-protected archive.
+    pub is_encrypted: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -647,6 +649,37 @@ pub fn is_supported_archive(path: &Path) -> bool {
     ResolvedFormat::from_path(path).is_some_and(|format| format.capabilities().can_list)
 }
 
+/// Checks ZIP and 7z metadata for password protection without extracting entries.
+pub(crate) fn is_password_protected(path: &Path) -> bool {
+    match ResolvedFormat::from_path(path) {
+        Some(ResolvedFormat::Zip) => File::open(path)
+            .ok()
+            .and_then(|file| ZipArchive::new(file).ok())
+            .is_some_and(|mut archive| {
+                (0..archive.len()).any(|index| {
+                    archive
+                        .by_index_raw(index)
+                        .is_ok_and(|entry| entry.encrypted())
+                })
+            }),
+        Some(ResolvedFormat::SevenZip) => {
+            match SevenZReader::open(path, Password::empty()) {
+                Ok(archive) => archive
+                    .archive()
+                    .folders
+                    .iter()
+                    .flat_map(|folder| &folder.coders)
+                    .any(|coder| coder.decompression_method_id() == [0x06, 0xf1, 0x07, 0x01]),
+                Err(error) => matches!(
+                    seven_zip_error(error, None).downcast_ref::<PasswordFailure>(),
+                    Some(PasswordFailure::Required)
+                ),
+            }
+        }
+        _ => false,
+    }
+}
+
 /// Reports whether the resolved file format supports content extraction.
 pub fn can_extract_archive(path: &Path) -> bool {
     ResolvedFormat::from_path(path).is_some_and(|format| format.capabilities().can_extract)
@@ -712,6 +745,7 @@ fn list_extended_archive(path: &Path) -> Result<Vec<ArchiveEntry>> {
                 size: entry.data.as_ref().map_or(0, |data| data.size),
                 modified: None,
                 is_directory: entry.file_type == xara::XarFileType::Directory,
+                is_encrypted: false,
             })
             .collect());
     }
@@ -728,6 +762,7 @@ fn list_extended_archive(path: &Path) -> Result<Vec<ArchiveEntry>> {
                 .mtime()
                 .map(|time| chrono::DateTime::<chrono::Local>::from(time).date_naive()),
             is_directory: entry.file_type() == libarchive2::FileType::Directory,
+            is_encrypted: false,
         });
     }
     Ok(entries)
@@ -825,6 +860,7 @@ fn list_single_compressed(path: &Path, format: ResolvedFormat) -> Result<Vec<Arc
         size,
         is_directory: false,
         modified: None,
+        is_encrypted: false,
     }])
 }
 
@@ -2451,6 +2487,7 @@ fn list_zip(path: &Path, password: Option<&str>) -> Result<Vec<ArchiveEntry>> {
                 )
             }),
             is_directory: file.is_dir(),
+            is_encrypted: encrypted,
         });
     }
 
@@ -2480,6 +2517,7 @@ fn list_tar<R: Read>(reader: R, path: &Path) -> Result<Vec<ArchiveEntry>> {
                 .and_then(|time| chrono::DateTime::from_timestamp(i64::try_from(time).ok()?, 0))
                 .map(|time| time.with_timezone(&chrono::Local).date_naive()),
             is_directory: entry.header().entry_type().is_dir(),
+            is_encrypted: false,
         });
     }
 
@@ -2514,6 +2552,7 @@ fn list_seven_zip(path: &Path, password: Option<&str>) -> Result<Vec<ArchiveEntr
                     .then(|| crate::browser::date_from_filetime(entry.last_modified_date.to_raw()))
                     .flatten(),
                 is_directory: entry.is_directory(),
+                is_encrypted: encrypted && !entry.is_directory(),
             });
             Ok(true)
         })
@@ -2562,6 +2601,7 @@ fn list_rar(path: &Path, password: Option<&str>) -> Result<Vec<ArchiveEntry>> {
                 size: header.unpacked_size,
                 modified: None,
                 is_directory: header.is_directory(),
+                is_encrypted: false,
             })
         })
         .collect()

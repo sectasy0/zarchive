@@ -644,6 +644,7 @@ mod tests {
                 size: 5,
                 is_directory: false,
                 modified: None,
+                is_encrypted: false,
             }];
             manager
         });

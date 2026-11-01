@@ -655,6 +655,7 @@ mod tests {
                     size,
                     modified,
                     is_directory,
+                    is_encrypted: false,
                 },
             )
             .collect();

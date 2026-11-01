@@ -13,6 +13,7 @@ impl AssetSource for IconAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         let svg: &'static [u8] = match path {
             "icons/archive.svg" => include_bytes!("../assets/icons/archive.svg"),
+            "icons/archive-locked.svg" => include_bytes!("../assets/icons/archive-locked.svg"),
             "icons/binary.svg" => include_bytes!("../assets/icons/binary.svg"),
             "icons/arrow-down.svg" => include_bytes!("../assets/icons/arrow-down.svg"),
             "icons/arrow-left.svg" => include_bytes!("../assets/icons/arrow-left.svg"),
@@ -23,6 +24,7 @@ impl AssetSource for IconAssets {
             "icons/chevron-right.svg" => include_bytes!("../assets/icons/chevron-right.svg"),
             "icons/chevron-up.svg" => include_bytes!("../assets/icons/chevron-up.svg"),
             "icons/code.svg" => include_bytes!("../assets/icons/code.svg"),
+            "icons/csv.svg" => include_bytes!("../assets/icons/csv.svg"),
             "icons/document.svg" => include_bytes!("../assets/icons/document.svg"),
             "icons/documents.svg" => include_bytes!("../assets/icons/documents.svg"),
             "icons/file.svg" => include_bytes!("../assets/icons/file.svg"),
@@ -37,9 +39,6 @@ impl AssetSource for IconAssets {
             "icons/xmark.svg" => include_bytes!("../assets/icons/xmark.svg"),
             "icons/box-open.svg" => include_bytes!("../assets/icons/box-open.svg"),
             "icons/folder-open.svg" => include_bytes!("../assets/icons/folder-open.svg"),
-            "icons/folder-open-menu.svg" => {
-                include_bytes!("../assets/icons/folder-open-menu.svg")
-            }
             "icons/shield-halved.svg" => include_bytes!("../assets/icons/shield-halved.svg"),
             _ => return gpui::AssetSource::load(&gpui::assets::AllAssets, path).or(Ok(None)),
         };
@@ -53,6 +52,7 @@ impl AssetSource for IconAssets {
         }
         Ok([
             "archive.svg",
+            "archive-locked.svg",
             "binary.svg",
             "shield-halved.svg",
             "arrow-down.svg",
@@ -64,6 +64,7 @@ impl AssetSource for IconAssets {
             "chevron-right.svg",
             "chevron-up.svg",
             "code.svg",
+            "csv.svg",
             "document.svg",
             "documents.svg",
             "file.svg",
@@ -79,7 +80,6 @@ impl AssetSource for IconAssets {
             "box-open.svg",
             "shield-halved.svg",
             "folder-open.svg",
-            "folder-open-menu.svg",
         ]
         .into_iter()
         .map(SharedString::from)
@@ -96,6 +96,7 @@ mod tests {
     fn registered_icons_load_as_svg_assets() {
         let paths = [
             "icons/archive.svg",
+            "icons/archive-locked.svg",
             "icons/binary.svg",
             "icons/arrow-down.svg",
             "icons/arrow-left.svg",
@@ -106,6 +107,7 @@ mod tests {
             "icons/chevron-right.svg",
             "icons/chevron-up.svg",
             "icons/code.svg",
+            "icons/csv.svg",
             "icons/document.svg",
             "icons/documents.svg",
             "icons/file.svg",
@@ -120,9 +122,7 @@ mod tests {
             "icons/xmark.svg",
             "icons/box-open.svg",
             "icons/shield-halved.svg",
-            "icons/folder-open.svg",
-            "icons/folder-open-menu.svg",
-        ];
+            "icons/folder-open.svg",        ];
 
         for path in paths {
             let asset = <IconAssets as gpui::AssetSource>::load(&IconAssets, path)

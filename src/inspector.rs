@@ -1918,6 +1918,7 @@ mod tests {
                 size: std::fs::metadata(&path).unwrap().len(),
                 is_directory: false,
                 modified: None,
+                is_encrypted: false,
             }];
             manager.selected_entry = Some(name.clone());
             manager.inspector.visible = true;
@@ -1982,6 +1983,7 @@ mod tests {
                     size: 1,
                     is_directory: false,
                     modified: None,
+                    is_encrypted: false,
                 })
                 .chain(std::iter::once(crate::archive::ArchiveEntry {
                     name: "zz-archive.zip".into(),
@@ -1989,6 +1991,7 @@ mod tests {
                     size: std::fs::metadata(&archive_path).unwrap().len(),
                     is_directory: false,
                     modified: None,
+                    is_encrypted: false,
                 }))
                 .collect();
             manager
@@ -2039,6 +2042,7 @@ mod tests {
                 size: 100,
                 is_directory: false,
                 modified: None,
+                is_encrypted: false,
             }];
             manager
         });
@@ -2144,6 +2148,7 @@ mod tests {
                 size: std::fs::metadata(&path).unwrap().len(),
                 is_directory: false,
                 modified: None,
+                is_encrypted: false,
             }];
             manager
         });
