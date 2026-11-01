@@ -55,6 +55,51 @@ pub(crate) struct TextContent {
     pub truncated: bool,
 }
 
+#[derive(Clone)]
+pub(crate) struct HexRow {
+    pub offset: usize,
+    pub hex: String,
+    pub ascii: String,
+}
+
+pub(crate) struct HexPreview {
+    pub rows: Vec<HexRow>,
+    pub truncated: bool,
+}
+
+pub(crate) enum PreviewData {
+    Text(TextContent),
+    Binary(HexPreview),
+}
+
+fn hex_preview(bytes: &[u8]) -> HexPreview {
+    let truncated = bytes.len() > MAX_BYTES;
+    let bytes = &bytes[..bytes.len().min(MAX_BYTES)];
+    let rows = bytes
+        .chunks(16)
+        .enumerate()
+        .map(|(index, chunk)| HexRow {
+            offset: index * 16,
+            hex: chunk
+                .iter()
+                .map(|byte| format!("{byte:02X}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            ascii: chunk
+                .iter()
+                .map(|byte| {
+                    if (b' '..=b'~').contains(byte) {
+                        char::from(*byte)
+                    } else {
+                        '.'
+                    }
+                })
+                .collect(),
+        })
+        .collect();
+    HexPreview { rows, truncated }
+}
+
 struct CsvTable {
     headers: Vec<gpui::SharedString>,
     rows: Vec<Vec<gpui::SharedString>>,
@@ -174,7 +219,7 @@ fn is_csv_target(target: &EntryTarget) -> bool {
 pub(crate) fn load(
     target: &crate::file_actions::EntryTarget,
     cancel: &AtomicBool,
-) -> anyhow::Result<Option<TextContent>> {
+) -> anyhow::Result<PreviewData> {
     let bytes = if let Some(entry) = &target.archive_entry {
         crate::archive::read_entry_prefix(
             &target.path,
@@ -190,7 +235,10 @@ pub(crate) fn load(
     } else {
         read_prefix(&mut std::fs::File::open(&target.path)?, cancel)?
     };
-    Ok(decode(&bytes))
+    Ok(match decode(&bytes) {
+        Some(content) => PreviewData::Text(content),
+        None => PreviewData::Binary(hex_preview(&bytes)),
+    })
 }
 
 pub(crate) fn read_prefix(reader: &mut impl Read, cancel: &AtomicBool) -> io::Result<Vec<u8>> {
@@ -265,10 +313,10 @@ pub(crate) struct Preview {
     target: EntryTarget,
     manager: gpui::WeakEntity<ArchiveManager>,
     content: Option<TextContent>,
+    hex: Option<HexPreview>,
     editor: Option<gpui::Entity<EditorState>>,
     csv: Option<CsvTable>,
     error: Option<String>,
-    binary: bool,
     cancel: Arc<AtomicBool>,
     task: Option<u64>,
     scroll: gpui::UniformListScrollHandle,
@@ -305,10 +353,10 @@ impl ArchiveManager {
             target,
             manager,
             content: None,
+            hex: None,
             editor: None,
             csv: None,
             error: None,
-            binary: false,
             cancel: cancel.clone(),
             task: None,
             scroll: gpui::UniformListScrollHandle::new(),
@@ -322,10 +370,15 @@ impl ArchiveManager {
             move |control, reporter| async move {
                 reporter.set(0, 1);
                 if !control.checkpoint() { anyhow::bail!("cancelled"); }
-                let result = load(&worker_target, &worker_cancel)?.map(|content| {
-                    let table = is_csv_target(&worker_target).then(|| CsvTable::parse(&content)).flatten();
-                    (content, table)
-                });
+                let result = match load(&worker_target, &worker_cancel)? {
+                    PreviewData::Text(content) => {
+                        let table = is_csv_target(&worker_target)
+                            .then(|| CsvTable::parse(&content))
+                            .flatten();
+                        (PreviewData::Text(content), table)
+                    }
+                    PreviewData::Binary(hex) => (PreviewData::Binary(hex), None),
+                };
                 reporter.set(1, 1);
                 if !control.checkpoint() { anyhow::bail!("cancelled"); }
                 Ok(result)
@@ -334,7 +387,7 @@ impl ArchiveManager {
                 let _ = view.update(cx, |preview, cx| {
                     if preview.cancel.load(Ordering::Relaxed) { preview.task = None; cx.notify(); return; }
                             match result {
-                                Ok(Some((content, table))) => {
+                                Ok((PreviewData::Text(content), table)) => {
                                     if table.is_none() {
                                         preview.editor = Some(cx.new(|cx| {
                                             EditorState::new(window, cx)
@@ -349,7 +402,7 @@ impl ArchiveManager {
                                     preview.csv = table;
                                     preview.content = Some(content);
                                 }
-                                Ok(None) => preview.binary = true,
+                                Ok((PreviewData::Binary(hex), _)) => preview.hex = Some(hex),
                                 Err(crate::task_queue::TaskFailure::Cancelled) => {},
                                 Err(crate::task_queue::TaskFailure::Failed(error)) => preview.error = Some(format!("{error:#}")),
                             }
@@ -388,8 +441,6 @@ impl Render for Preview {
             Some(language.text("Loading text preview..."))
         } else if let Some(error) = &self.error {
             Some(language.error_message(error))
-        } else if self.binary {
-            Some(language.text("Text preview is unavailable for this file"))
         } else if self
             .content
             .as_ref()
@@ -398,6 +449,13 @@ impl Render for Preview {
             Some(language.text("This file is empty"))
         } else {
             None
+        };
+        let preview_label = if self.hex.is_some() {
+            "Binary preview"
+        } else if self.csv.is_some() {
+            "CSV preview"
+        } else {
+            "Text preview"
         };
         div()
             .id("text-preview")
@@ -421,16 +479,19 @@ impl Render for Preview {
                     .px_2()
                     .border_b_1()
                     .border_color(rgb(theme.border))
-                    .child(
+                    .child(if self.hex.is_some() {
+                        crate::app_icon("binary", 14.0, theme.accent).into_any_element()
+                    } else {
                         gpui::component::Icon::new(gpui::assets::IconName::FileText)
                             .size(px(14.0))
-                            .text_color(rgb(theme.accent)),
-                    )
+                            .text_color(rgb(theme.accent))
+                            .into_any_element()
+                    })
                     .child(
                         div()
                             .text_xs()
                             .flex_shrink_0()
-                            .child(language.text(if self.csv.is_some() { "CSV preview" } else { "Text preview" })),
+                            .child(language.text(preview_label)),
                     )
                     .child(
                         div()
@@ -477,6 +538,7 @@ impl Render for Preview {
                 self.content
                     .as_ref()
                     .is_some_and(|content| content.truncated)
+                    || self.hex.as_ref().is_some_and(|hex| hex.truncated)
                     || self.csv.as_ref().is_some_and(|table| table.truncated),
                 |panel| {
                     panel.child(
@@ -502,6 +564,74 @@ impl Render for Preview {
                         .text_sm()
                         .text_color(rgb(theme.muted_text))
                         .child(message),
+                )
+            })
+            .when(message.is_none() && self.hex.is_some(), |panel| {
+                let hex = self.hex.as_ref().unwrap();
+                panel.child(
+                    div()
+                        .id("binary-preview-scroll")
+                        .debug_selector(|| "binary-preview-scroll".to_owned())
+                        .flex()
+                        .flex_1()
+                        .h_full()
+                        .min_h(px(0.0))
+                        .overflow_x_scroll()
+                        .child(
+                            div()
+                                .id("binary-preview-table")
+                                .debug_selector(|| "binary-preview-table".to_owned())
+                                .flex()
+                                .flex_col()
+                                .w_full()
+                                .min_w(px(720.0))
+                                .h_full()
+                                .min_h(px(0.0))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .h(px(28.0))
+                                        .flex_shrink_0()
+                                        .bg(rgb(theme.sidebar))
+                                        .border_b_1()
+                                        .border_color(rgb(theme.border))
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(rgb(theme.muted_text))
+                                        .child(div().w(px(100.0)).px_2().child(language.text("Offset")))
+                                        .child(div().flex_1().min_w(px(390.0)).px_2().child(language.text("Hex bytes")))
+                                        .child(
+                                            div()
+                                                .id("binary-preview-ascii-heading")
+                                                .debug_selector(|| "binary-preview-ascii-heading".to_owned())
+                                                .w(px(220.0))
+                                                .px_2()
+                                                .child(language.text("ASCII")),
+                                        ),
+                                )
+                                .child(
+                                    gpui::uniform_list(
+                                        "binary-preview-rows",
+                                        hex.rows.len(),
+                                        cx.processor(|preview, range: std::ops::Range<usize>, _, _| {
+                                            let hex = preview.hex.as_ref().unwrap();
+                                            range
+                                                .filter_map(|index| hex.rows.get(index).cloned().map(|row| hex_row(index, row, preview.theme)))
+                                                .collect()
+                                        }),
+                                    )
+                                    .track_scroll(&self.scroll)
+                                    .flex_1()
+                                    .min_h(px(0.0))
+                                    .w_full(),
+                                ),
+                        )
+                        .child(
+                            gpui::component::scroll::Scrollbar::vertical(&self.scroll)
+                                .id("binary-preview-scrollbar")
+                                .mode(gpui::component::scroll::ScrollbarMode::Always),
+                        ),
                 )
             })
             .when(message.is_none() && self.csv.is_some(), |panel| {
@@ -550,7 +680,7 @@ impl Render for Preview {
                                 .track_scroll(&self.scroll).flex_1().min_h(px(0.0)).w_full()))
                 )
             })
-            .when(message.is_none() && self.csv.is_none(), |panel| {
+            .when(message.is_none() && self.csv.is_none() && self.hex.is_none(), |panel| {
                 panel.child(
                     div()
                         .id("text-preview-editor")
@@ -579,9 +709,59 @@ impl Render for Preview {
     }
 }
 
+fn hex_row(index: usize, row: HexRow, theme: Theme) -> impl IntoElement {
+    div()
+        .id(("binary-preview-row", index))
+        .debug_selector(move || format!("binary-preview-row-{index}"))
+        .flex()
+        .items_center()
+        .w_full()
+        .h(px(24.0))
+        .flex_shrink_0()
+        .border_b_1()
+        .border_color(rgb(theme.subtle_border))
+        .when(index % 2 == 1, |row| row.bg(rgb(theme.sidebar)))
+        .hover(|style| style.bg(rgb(theme.hover)))
+        .text_size(px(11.0))
+        .font_family("Menlo")
+        .child(
+            div()
+                .w(px(100.0))
+                .flex_shrink_0()
+                .px_2()
+                .text_color(rgb(theme.faint_text))
+                .child(format!("{:08X}", row.offset)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(390.0))
+                .px_2()
+                .text_color(rgb(theme.text))
+                .child(row.hex),
+        )
+        .child(
+            div()
+                .id(("binary-preview-ascii", index))
+                .debug_selector(move || format!("binary-preview-ascii-{index}"))
+                .w(px(220.0))
+                .flex_shrink_0()
+                .px_2()
+                .text_color(rgb(theme.muted_text))
+                .child(row.ascii),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn load_text_preview(target: &EntryTarget, cancel: &AtomicBool) -> TextContent {
+        match load(target, cancel).unwrap() {
+            PreviewData::Text(content) => content,
+            PreviewData::Binary(_) => panic!("expected text preview"),
+        }
+    }
 
     #[gpui::test]
     fn preview_editor_receives_code_language_for_plain_archived_and_compressed_files(
@@ -1078,17 +1258,28 @@ mod tests {
             )
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("text-preview-message").is_some());
+        assert!(cx.debug_bounds("binary-preview-table").is_some());
+        assert!(cx.debug_bounds("binary-preview-row-0").is_some());
+        assert!(cx.debug_bounds("binary-preview-ascii-0").unwrap().size.width >= px(220.0));
+        assert!(cx.debug_bounds("binary-preview-table").unwrap().size.width >= px(720.0));
+        let preview_bounds = cx.debug_bounds("text-preview").unwrap();
+        let scroll_bounds = cx.debug_bounds("binary-preview-scroll").unwrap();
+        let table_bounds = cx.debug_bounds("binary-preview-table").unwrap();
+        assert!(scroll_bounds.size.height > px(100.0));
+        assert!(
+            scroll_bounds.bottom() >= preview_bounds.bottom() - px(2.0),
+            "binary viewport {:?}, table {:?}, preview {:?}",
+            scroll_bounds,
+            table_bounds,
+            preview_bounds
+        );
         cx.read(|cx| {
-            assert!(
-                view.read(cx)
-                    .inspector
-                    .text_preview
-                    .as_ref()
-                    .unwrap()
-                    .read(cx)
-                    .binary
-            )
+            let manager = view.read(cx);
+            let preview = manager.inspector.text_preview.as_ref().unwrap().read(cx);
+            assert!(preview.content.is_none());
+            let row = &preview.hex.as_ref().unwrap().rows[0];
+            assert_eq!(row.hex, "00 01 02 FF");
+            assert_eq!(row.ascii, "....");
         });
     }
 
@@ -1153,7 +1344,7 @@ mod tests {
             password: None,
             is_directory: false,
         };
-        assert_eq!(load(&target, &cancel).unwrap().unwrap().text, text);
+        assert_eq!(load_text_preview(&target, &cancel).text, text);
         for format in ResolvedFormat::CREATION_FORMATS {
             let path = directory
                 .path()
@@ -1174,14 +1365,12 @@ mod tests {
             } else {
                 Some("文字.txt".into())
             };
-            let preview = load(&target, &cancel)
-                .unwrap_or_else(|error| panic!("{}: {error:#}", format.label()))
-                .unwrap();
+            let preview = load_text_preview(&target, &cancel);
             assert_eq!(preview.text, text, "{}", format.label());
             assert!(!preview.truncated);
             if format.is_single_compressed() {
                 target.archive_entry = None;
-                assert_eq!(load(&target, &cancel).unwrap().unwrap().text, text);
+                assert_eq!(load_text_preview(&target, &cancel).text, text);
             }
         }
     }
@@ -1217,7 +1406,7 @@ mod tests {
                 ))),
                 is_directory: false,
             };
-            let preview = load(&target, &cancel).unwrap().unwrap();
+            let preview = load_text_preview(&target, &cancel);
             assert!(preview.truncated);
             assert_eq!(preview.text.len(), MAX_BYTES);
             let mut invalid = target.clone();
@@ -1240,6 +1429,22 @@ mod tests {
         assert_eq!(decode(b"\xef\xbb\xbftext").unwrap().text, "text");
         assert!(decode(b"text\0binary").is_none());
         assert!(decode(&[0xff, 0x80, 0x01]).is_none());
+    }
+
+    #[test]
+    fn hex_preview_formats_offsets_bytes_and_truncates_to_preview_limit() {
+        let preview = hex_preview(b"Hello, binary!");
+        assert_eq!(preview.rows.len(), 1);
+        assert_eq!(preview.rows[0].offset, 0);
+        assert_eq!(preview.rows[0].hex, "48 65 6C 6C 6F 2C 20 62 69 6E 61 72 79 21");
+        assert_eq!(preview.rows[0].ascii, "Hello, binary!");
+        assert!(!preview.truncated);
+
+        let large = vec![0_u8; MAX_BYTES + 1];
+        let preview = hex_preview(&large);
+        assert!(preview.truncated);
+        assert_eq!(preview.rows.len(), MAX_BYTES / 16);
+        assert_eq!(preview.rows.last().unwrap().offset, MAX_BYTES - 16);
     }
 
     #[test]

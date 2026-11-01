@@ -1805,6 +1805,8 @@ fn file_icon(extension: &str) -> &'static str {
         "txt" | "md" | "rtf" | "doc" | "docx" | "odt" => "document",
         "xls" | "xlsx" | "csv" | "ods" => "table",
         "ppt" | "pptx" | "odp" => "presentation",
+        "bin" | "dat" | "exe" | "dll" | "so" | "dylib" | "class" | "o" | "obj"
+        | "wasm" | "db" | "sqlite" | "sqlite3" | "iso" => "binary",
         _ => "file",
     }
 }
@@ -2800,6 +2802,12 @@ mod tests {
         for extension in ["bz2", "tbz", "tbz2", "xz", "txz", "zst", "lz4", "lz", "br"] {
             assert_eq!(file_icon(extension), "archive");
         }
+        for extension in [
+            "bin", "dat", "exe", "dll", "so", "dylib", "class", "o", "obj", "wasm",
+            "db", "sqlite", "sqlite3", "iso",
+        ] {
+            assert_eq!(file_icon(extension), "binary");
+        }
         assert_eq!(file_icon("unknown"), "file");
     }
 
@@ -2810,6 +2818,7 @@ mod tests {
         assert_eq!(icon_aspect_ratio("documents"), 0.875);
         assert_eq!(icon_aspect_ratio("code"), 0.75);
         assert_eq!(icon_aspect_ratio("folder"), 1.0);
+        assert_eq!(icon_aspect_ratio("binary"), 1.0);
         assert_eq!(icon_aspect_ratio("chevron-left"), 0.625);
         assert_eq!(icon_aspect_ratio("chevron-up"), 1.0);
         assert_eq!(icon_aspect_ratio("chevron-down"), 1.0);

@@ -13,6 +13,7 @@ impl AssetSource for IconAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
         let svg: &'static [u8] = match path {
             "icons/archive.svg" => include_bytes!("../assets/icons/archive.svg"),
+            "icons/binary.svg" => include_bytes!("../assets/icons/binary.svg"),
             "icons/arrow-down.svg" => include_bytes!("../assets/icons/arrow-down.svg"),
             "icons/arrow-left.svg" => include_bytes!("../assets/icons/arrow-left.svg"),
             "icons/arrow-up.svg" => include_bytes!("../assets/icons/arrow-up.svg"),
@@ -52,6 +53,7 @@ impl AssetSource for IconAssets {
         }
         Ok([
             "archive.svg",
+            "binary.svg",
             "shield-halved.svg",
             "arrow-down.svg",
             "arrow-left.svg",
@@ -94,6 +96,7 @@ mod tests {
     fn registered_icons_load_as_svg_assets() {
         let paths = [
             "icons/archive.svg",
+            "icons/binary.svg",
             "icons/arrow-down.svg",
             "icons/arrow-left.svg",
             "icons/arrow-up.svg",

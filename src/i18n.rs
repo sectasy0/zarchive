@@ -383,6 +383,17 @@ const TRANSLATIONS: &[(&str, &str, &str, &str, &str, &str)] = &[
         "Textvorschau",
     ),
     (
+        "Binary preview",
+        "Podgląd binarny",
+        "二进制预览",
+        "Vista previa binaria",
+        "バイナリプレビュー",
+        "Binärvorschau",
+    ),
+    ("Offset", "Offset", "偏移", "Desplazamiento", "オフセット", "Offset"),
+    ("Hex bytes", "Bajty hex", "十六进制字节", "Bytes hexadecimales", "16進数バイト", "Hex-Bytes"),
+    ("ASCII", "ASCII", "ASCII", "ASCII", "ASCII", "ASCII"),
+    (
         "Loading text preview...",
         "Wczytywanie podglądu tekstu...",
         "正在加载文本预览……",
