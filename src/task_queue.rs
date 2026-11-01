@@ -378,14 +378,29 @@ impl BackgroundQueue {
                                     )
                                     .child(
                                         div()
-                                            .text_xs()
-                                            .text_color(rgb(theme.muted_text))
-                                            .truncate()
-                                            .child(if phase.is_empty() {
-                                                status.to_owned()
-                                            } else {
-                                                format!("{status} - {phase}")
-                                            }),
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .when(task.status == TaskStatus::Completed, |status| {
+                                                status.child(
+                                                    gpui::component::Icon::new(
+                                                        gpui::assets::IconName::Check,
+                                                    )
+                                                    .size(px(12.0))
+                                                    .text_color(rgb(theme.accent)),
+                                                )
+                                            })
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(theme.muted_text))
+                                                    .truncate()
+                                                    .child(if phase.is_empty() {
+                                                        status.to_owned()
+                                                    } else {
+                                                        format!("{status} - {phase}")
+                                                    }),
+                                            ),
                                     ),
                             )
                             .child(
