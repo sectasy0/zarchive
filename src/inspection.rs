@@ -1263,7 +1263,7 @@ fn audit_metadata(report: &mut Report, mode: InspectionMode) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1434,10 +1434,52 @@ mod tests {
         assert!(report.entries[0].error.is_some());
     }
 
+    fn write_corrupt_entry_sample(path: &Path) {
+        let payload = b"corrupt this stored payload";
+        let mut zip = zip::ZipWriter::new(File::create(path).unwrap());
+        zip.start_file(
+            "integrity/notes.txt",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+        zip.write_all(payload).unwrap();
+        zip.finish().unwrap();
+        let mut bytes = std::fs::read(path).unwrap();
+        let offset = bytes
+            .windows(payload.len())
+            .position(|window| window == payload)
+            .unwrap();
+        bytes[offset] ^= 1;
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    pub(crate) fn write_audit_sample(path: &Path) {
+        let mut zip = zip::ZipWriter::new(File::create(path).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, contents) in [
+            ("README.txt", b"Audit findings sample".as_slice()),
+            ("copies/first.txt", b"duplicate payload"),
+            ("copies/second.txt", b"duplicate payload"),
+            ("SAME.txt", b"first name"),
+            ("same.TXT", b"second name"),
+            ("nested.zip", b"PK\x05\x06\0\0"),
+            ("image.txt", b"\x89PNG\r\n\x1a\n"),
+            ("../escape.txt", b"unsafe path"),
+        ] {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(contents).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
     #[test]
-    /// Confirms the bundled corrupted-entry fixture fails CRC verification.
+    /// Confirms the corrupted-entry fixture fails CRC verification.
     fn bundled_corrupt_entry_sample_fails_crc_verification() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/13-corrupt-entry.zip");
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("corrupt-entry.zip");
+        write_corrupt_entry_sample(&path);
         let report = inspect(
             &path,
             None,
@@ -1455,9 +1497,11 @@ mod tests {
     }
 
     #[test]
-    /// Confirms the bundled audit fixture produces multiple finding categories.
+    /// Confirms the audit fixture produces multiple finding categories.
     fn bundled_audit_sample_covers_multiple_finding_kinds() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/14-audit-findings.zip");
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("audit-findings.zip");
+        write_audit_sample(&path);
         for mode in [InspectionMode::Audit, InspectionMode::FullAudit] {
             let report = inspect(&path, None, mode, &AtomicBool::new(false));
             assert_eq!(report.integrity, Integrity::Passed);
@@ -1490,7 +1534,9 @@ mod tests {
         assert_eq!(InspectionMode::FullAudit.max_entry_bytes(), u64::MAX);
         assert_eq!(InspectionMode::FullAudit.max_total_bytes(), u64::MAX);
 
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/14-audit-findings.zip");
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("audit-findings.zip");
+        write_audit_sample(&path);
         let mut bounded = inspect(&path, None, InspectionMode::Audit, &AtomicBool::new(false));
         let mut full = inspect(&path, None, InspectionMode::FullAudit, &AtomicBool::new(false));
         bounded.findings.clear();
@@ -1509,51 +1555,19 @@ mod tests {
     #[ignore = "generates manual integrity and audit sample archives"]
     /// Regenerates sample archives used by manual integrity and audit checks.
     fn generate_integrity_and_audit_samples() {
-        use std::fs::{self, File};
+        use std::fs;
 
         let samples = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples");
         fs::create_dir_all(&samples).unwrap();
 
         let damaged = samples.join("13-corrupt-entry.zip");
         if !damaged.exists() {
-            let payload = b"corrupt this stored payload";
-            let mut zip = zip::ZipWriter::new(File::create(&damaged).unwrap());
-            zip.start_file(
-                "integrity/notes.txt",
-                zip::write::SimpleFileOptions::default()
-                    .compression_method(zip::CompressionMethod::Stored),
-            )
-            .unwrap();
-            zip.write_all(payload).unwrap();
-            zip.finish().unwrap();
-            let mut bytes = fs::read(&damaged).unwrap();
-            let offset = bytes
-                .windows(payload.len())
-                .position(|window| window == payload)
-                .unwrap();
-            bytes[offset] ^= 1;
-            fs::write(&damaged, bytes).unwrap();
+            write_corrupt_entry_sample(&damaged);
         }
 
         let audit = samples.join("14-audit-findings.zip");
         if !audit.exists() {
-            let mut zip = zip::ZipWriter::new(File::create(&audit).unwrap());
-            let options = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Stored);
-            for (name, contents) in [
-                ("README.txt", b"Audit findings sample".as_slice()),
-                ("copies/first.txt", b"duplicate payload"),
-                ("copies/second.txt", b"duplicate payload"),
-                ("SAME.txt", b"first name"),
-                ("same.TXT", b"second name"),
-                ("nested.zip", b"PK\x05\x06\0\0"),
-                ("image.txt", b"\x89PNG\r\n\x1a\n"),
-                ("../escape.txt", b"unsafe path"),
-            ] {
-                zip.start_file(name, options).unwrap();
-                zip.write_all(contents).unwrap();
-            }
-            zip.finish().unwrap();
+            write_audit_sample(&audit);
         }
 
         assert!(damaged.exists());

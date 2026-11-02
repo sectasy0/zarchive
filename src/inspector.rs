@@ -1905,11 +1905,15 @@ mod tests {
     #[gpui::test]
     /// Preserves audit findings when the same archive is tested for integrity afterward.
     fn integrity_test_keeps_findings_from_previous_audit(cx: &mut gpui::TestAppContext) {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/14-audit-findings.zip");
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("audit-findings.zip");
+        inspection::tests::write_audit_sample(&path);
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         let audit =
             inspection::inspect(&path, None, InspectionMode::Audit, &AtomicBool::new(false));
+        assert_eq!(audit.integrity, Integrity::Passed);
         let expected_findings = audit.findings.clone();
+        assert!(!expected_findings.is_empty());
         let (view, cx) = crate::tests::component_window(cx, |_, cx| {
             let mut manager = crate::tests::test_manager(cx);
             manager.current_directory = Some(path.parent().unwrap().to_path_buf());
