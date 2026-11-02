@@ -34,7 +34,7 @@ use gpui::{
 };
 use i18n::Language;
 use icons::IconAssets;
-pub(crate) use preferences::{AccentColor, ThemeMode, UserPreferences};
+pub(crate) use preferences::{AccentColor, AdvancedSettings, ThemeMode, UserPreferences};
 use preferences::{load_user_preferences, user_preferences_path};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -72,6 +72,8 @@ enum SettingsCategory {
     General,
     /// Theme and accent appearance preferences.
     Appearance,
+    /// Preview size and table resource limits.
+    Advanced,
 }
 
 #[derive(Clone, Copy)]
@@ -186,6 +188,7 @@ struct ArchiveManager {
     accent_color: AccentColor,
     default_location: Option<PathBuf>,
     auto_calculate_folder_sizes: bool,
+    advanced_settings: AdvancedSettings,
     modal: Option<Modal>,
     settings_category: SettingsCategory,
     modal_focus: FocusHandle,
@@ -220,6 +223,7 @@ impl ArchiveManager {
             accent_color: self.accent_color,
             default_location: self.default_location.clone(),
             auto_calculate_folder_sizes: self.auto_calculate_folder_sizes,
+            advanced: self.advanced_settings,
         };
         if let Err(error) = preferences.save(path) {
             self.status_message = Some(format!(
@@ -2034,6 +2038,7 @@ fn main() {
                             accent_color: preferences.accent_color,
                             default_location: preferences.default_location.clone(),
                             auto_calculate_folder_sizes: preferences.auto_calculate_folder_sizes,
+                            advanced_settings: preferences.advanced,
                             modal: if startup_requires_password {
                                 Some(Modal::Password)
                             } else {
@@ -2065,8 +2070,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArchiveEntry, SortColumn, entry_icon, file_icon, icon_aspect_ratio, sort_entries,
-        visible_entries,
+        AdvancedSettings, ArchiveEntry, SortColumn, entry_icon, file_icon,
+        icon_aspect_ratio, sort_entries, visible_entries,
     };
 
     #[gpui::test]
@@ -2172,6 +2177,7 @@ mod tests {
             accent_color: AccentColor::Blue,
             default_location: None,
             auto_calculate_folder_sizes: true,
+            advanced_settings: AdvancedSettings::default(),
             modal: None,
             settings_category: super::SettingsCategory::General,
             modal_focus: cx.focus_handle(),

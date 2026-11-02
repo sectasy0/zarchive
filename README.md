@@ -19,19 +19,24 @@ available while your files are processed.
 
 ## Features
 
-- **Browse before extracting.** Navigate folders and archives, sort by name,
-  type, or size, and open individual files in their default desktop applications.
-- **Preview text without extracting.** Single-click a text file on disk, an
-  archive entry, or a standalone compressed text file to preview it in the bottom
-  panel. UTF-8 and BOM-marked UTF-16 are supported in a read-only GPUI Kit Editor,
-  with automatic syntax highlighting, line numbers, text selection, searching,
-  scrolling, and copying. Languages are detected from the original filename,
-  including archived and compressed files. The editor
-  surface follows the application's light or dark palette. Previews read up to
-  128 KiB and limit archive scanning; large
-  content is marked as truncated, and binary files are not displayed as text.
-  Drag the top edge of the preview panel to adjust its height; the chosen size
-  is retained while switching files during the session.
+- **Browse before extracting.** Navigate folders and archives, use Back and
+  Forward history, browse the folder tree, sort by name, type, or size, and open
+  individual files in their default desktop applications.
+- **Preview and edit text without extracting.** Single-click a text file on disk,
+  an archive entry, or a standalone compressed text file to preview it in the
+  bottom panel. UTF-8 and BOM-marked UTF-16 are supported, with syntax
+  highlighting, line numbers, searching, scrolling, and copying. Choose Edit to
+  modify local files or supported archive entries, then Save or Cancel. CSV table
+  previews can switch to the text editor for editing when the target is writable.
+  Archive changes use private staging and do not create an extracted copy in the
+  browsed folder. Previews are limited to 128 KiB, and truncated previews cannot
+  be saved to avoid discarding unseen data. Standalone compressed streams and
+  RAR entries can be previewed but not edited.
+- **Inspect and edit binary files.** The hex view shows offsets, byte values, and
+  printable ASCII. Edit bytes as two-digit hex values and save local files or
+  supported archive entries without visibly extracting them. Binary previews use
+  the same 128 KiB safety limit; standalone compressed streams and RAR entries
+  are not editable.
 - **Preview CSV as a table.** CSV files, including archive entries and compressed
   CSV files, use a virtualized table with a fixed header and horizontal scrolling.
   Commas, semicolons, tabs, quoted fields, and multiline values are supported.
@@ -50,8 +55,10 @@ available while your files are processed.
   values, and a filter editor. Dates are inclusive; items without a known date
   are excluded from date-filtered results. Clear filters without removing the
   file-name query, or clear the search to reset everything.
-- **Create and extract.** Package multiple files and folders, choose a compression
-  method and level, and extract entire archives or selected entries.
+- **Create and extract.** Package multiple files and folders, choose compression
+  methods and levels, include hidden files, force ZIP64, or tune 7z dictionary and
+  solid-compression settings. Encrypt ZIP and 7z archives, optionally encrypt 7z
+  filenames, and extract entire archives or selected entries.
 - **Manage background tasks.** A shared queue runs up to three tasks concurrently.
   Open the task indicator beside the status-bar error counters to view progress,
   pause, resume, cancel, or clear finished tasks. Extraction, archive creation and
@@ -60,16 +67,18 @@ available while your files are processed.
   are cooperative: an active codec or native system step may finish before the
   next checkpoint. Paused running tasks retain their worker reservation;
   cancellation does not undo files already moved or actions already committed.
-- **Protect sensitive files.** Create password-protected ZIP and 7z archives with
-  AES-256 encryption, including optional filename encryption for 7z. Passwords
-  are never saved to preferences or logs.
-- **Inspect archive contents.** Review entries, sizes, compression methods, and
-  available checksums without opening the files themselves.
-  The Entries tab has a context menu for extraction into the current folder,
-  copying entry paths, and removing entries with confirmation. Drop files onto
-  Entries to add them to the archive, or onto an entry folder to add them there.
-  The inspector refreshes after archive changes, including deletion of the last
-  entry. Empty XAR archives remain readable by the system's archive tools.
+- **Protect sensitive files.** Open password-protected ZIP and 7z archives and
+  create AES-256 encrypted archives, including optional filename encryption for
+  7z. Protected archives are marked in the file list. Passwords are never saved
+  to preferences or logs.
+- **Inspect archive contents.** Review entry sizes, compression, checksums,
+  permissions, ownership, comments, extra fields, link targets, and filesystem
+  metadata where available. Overview includes archive integrity and entry
+  summaries; the Entries tab has a context menu for extraction into the current
+  folder, copying entry paths, and removing entries with confirmation.
+  Drop files onto Entries to add them to the archive, or onto an entry folder to
+  add them there. The inspector refreshes after archive changes, including
+  deletion of the last entry. Empty XAR archives remain readable by system tools.
 - **Verify integrity.** Read archive data in the background, validate available
   checksums, and calculate CRC32 and SHA-256 during a full integrity check.
 - **Audit individual archives or batches.** Identify suspicious paths, duplicate
@@ -82,11 +91,12 @@ available while your files are processed.
   compare files, directories, moves and renames, empty folders, content, and
   available metadata. Results distinguish byte equality from semantic equality
   for JSON, XML, YAML, and TOML, and include SHA-256, SHA-512, BLAKE3, CRC32,
-  compression, permissions, and other metadata when available. Supported nested
-  archives are compared up to four levels deep and 128 nested archives. Large
-  structured files over 8 MiB are not semantically parsed, and text diffs are
-  limited to files up to 2 MiB; byte comparisons and hashes still process the
-  full file. Copy or save the visual comparison report as JSON.
+  compression, permissions, owner/group IDs, comments, and other metadata when
+  available in the archive format. Supported nested archives are compared up to
+  four levels deep and 128 nested archives. Large structured files over 8 MiB
+  are not semantically parsed, and text diffs are limited to files up to 2 MiB;
+  byte comparisons and hashes still process the full file. Copy or save the
+  visual comparison report as JSON.
 - **Drag and drop.** Open archives, navigate to folders, or add files and folders
   to a new archive directly from your desktop.
   Drag files or folders from the file list or desktop onto an existing archive,
@@ -96,8 +106,14 @@ available while your files are processed.
   Folder targets are available in the file list, the sidebar tree, and the
   Home/Documents shortcuts. Moves run in the background without overwriting
   existing items; drops into the same folder or a folder's descendants are rejected.
+- **Manage files safely.** Use context menus to copy paths, extract individual
+  entries, or remove files from supported archives with confirmation. Move
+  filesystem items between folders or send them to Trash; existing destinations
+  are never overwritten.
 - **Make it your workspace.** Choose a light, dark, or system theme, an accent
-  color, an interface language, and a default startup folder.
+  color, one of six interface languages, and a default startup folder. Folder
+  sizes are calculated automatically by default, with an option to turn that
+  background work off.
 
 ## Supported Formats
 
@@ -111,7 +127,7 @@ and disk-image containers.
 | ZIP | Yes | Yes | AES-256 |
 | TAR | Yes | Yes | Not available |
 | 7z | Yes | Yes | AES-256, optional filename encryption |
-| RAR | Yes | No | Not available |
+| RAR | Yes | Yes, with the external `rar` command-line tool | Not available |
 | CPIO | Yes | Yes | Not available |
 | AR | Yes | Yes (individual files only) | Not available |
 | PAX | Yes | Yes | Not available |
@@ -138,14 +154,20 @@ directory and replaced atomically. Name collisions are rejected rather than
 overwritten. ZIP and 7z additions preserve encryption and request a password
 when needed. AR supports individual files only, not folders.
 
+Editing a supported text or binary archive entry replaces that entry through
+private staging and publishes the updated archive atomically. No extracted copy
+is left in the browsed folder. Password-protected ZIP and 7z entries require the
+correct password. RAR entries and standalone compressed streams cannot be edited.
+
 Removing entries from ordinary or AES-encrypted ZIP archives copies surviving
 compressed/encrypted payloads without decrypting or recompressing them. AES
 ciphertext, timestamps, permissions, and comments are preserved. Legacy ZipCrypto
 archives still require a password and are rebuilt with AES encryption because
 the ZIP library's raw-copy API does not preserve their encryption flags safely.
 
-Updating RAR requires the external `rar` command-line tool on `PATH`; this is
-separate from the bundled RAR reader. Encrypted RAR updates are not supported.
+Creating or updating RAR requires the external `rar` command-line tool on
+`PATH`; this is separate from the bundled RAR reader. RAR encryption and
+updates to encrypted RAR archives are not supported.
 Standalone compression streams such as `.gz` and `.zst` contain one file and
 cannot accept additional files; use a TAR archive with that compression instead.
 

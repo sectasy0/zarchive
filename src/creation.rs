@@ -399,6 +399,20 @@ pub(crate) fn view(
         .child(language.text("Format"))
         .child(choice_view(ChoiceField::Format, manager, theme, cx))
         .when(
+            form.options.format == ResolvedFormat::Rar
+                && !form.options.format.capabilities().can_create,
+            |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme.muted_text))
+                        .child(language.text(
+                            "Install the rar command-line tool to create RAR archives",
+                        )),
+                )
+            },
+        )
+        .when(
             form.options.format.archive == Some(ArchiveFormat::Tar),
             |this| {
                 this.child(language.text("Compression method"))
@@ -550,7 +564,10 @@ pub fn footer(manager: &ArchiveManager, cx: &mut Context<ArchiveManager>) -> imp
                 .debug_selector(|| "create-archive-submit".to_owned())
                 .primary()
                 .small()
-                .disabled(manager.creation.sources.is_empty())
+                .disabled(
+                    manager.creation.sources.is_empty()
+                        || !manager.creation.options.format.capabilities().can_create,
+                )
                 .label(language.text("Create"))
                 .on_click(cx.listener(|this, _, window, cx| this.submit_archive(window, cx))),
         )

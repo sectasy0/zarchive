@@ -106,6 +106,45 @@ impl AccentColor {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Resource limits that can be adjusted in Advanced settings.
+pub(crate) struct AdvancedSettings {
+    /// Maximum bytes read for text and binary previews, in KiB.
+    pub(crate) preview_limit_kib: u32,
+    /// Maximum CSV data rows rendered in the preview table.
+    pub(crate) csv_max_rows: u32,
+    /// Maximum CSV columns rendered in the preview table.
+    pub(crate) csv_max_columns: u32,
+}
+
+impl AdvancedSettings {
+    pub(crate) const PREVIEW_LIMIT_RANGE: std::ops::RangeInclusive<u32> = 16..=1024;
+    pub(crate) const CSV_MAX_ROWS_RANGE: std::ops::RangeInclusive<u32> = 500..=50_000;
+    pub(crate) const CSV_MAX_COLUMNS_RANGE: std::ops::RangeInclusive<u32> = 8..=512;
+
+    pub(crate) fn preview_max_bytes(self) -> usize {
+        self.preview_limit_kib as usize * 1024
+    }
+
+    fn bounded_u32(value: Option<&serde_json::Value>, default: u32, range: std::ops::RangeInclusive<u32>) -> u32 {
+        value
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(default)
+            .clamp(*range.start(), *range.end())
+    }
+}
+
+impl Default for AdvancedSettings {
+    fn default() -> Self {
+        Self {
+            preview_limit_kib: 128,
+            csv_max_rows: 5_000,
+            csv_max_columns: 64,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// User-configurable settings saved between application launches.
 pub(crate) struct UserPreferences {
@@ -118,6 +157,7 @@ pub(crate) struct UserPreferences {
     /// Optional startup directory override.
     pub(crate) default_location: Option<PathBuf>,
     pub(crate) auto_calculate_folder_sizes: bool,
+    pub(crate) advanced: AdvancedSettings,
 }
 
 impl Default for UserPreferences {
@@ -129,6 +169,7 @@ impl Default for UserPreferences {
             accent_color: AccentColor::default(),
             default_location: None,
             auto_calculate_folder_sizes: true,
+            advanced: AdvancedSettings::default(),
         }
     }
 }
@@ -170,6 +211,26 @@ impl UserPreferences {
                 .get("auto_calculate_folder_sizes")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(true),
+            advanced: {
+                let advanced = value.get("advanced");
+                AdvancedSettings {
+                    preview_limit_kib: AdvancedSettings::bounded_u32(
+                        advanced.and_then(|value| value.get("preview_limit_kib")),
+                        AdvancedSettings::default().preview_limit_kib,
+                        AdvancedSettings::PREVIEW_LIMIT_RANGE,
+                    ),
+                    csv_max_rows: AdvancedSettings::bounded_u32(
+                        advanced.and_then(|value| value.get("csv_max_rows")),
+                        AdvancedSettings::default().csv_max_rows,
+                        AdvancedSettings::CSV_MAX_ROWS_RANGE,
+                    ),
+                    csv_max_columns: AdvancedSettings::bounded_u32(
+                        advanced.and_then(|value| value.get("csv_max_columns")),
+                        AdvancedSettings::default().csv_max_columns,
+                        AdvancedSettings::CSV_MAX_COLUMNS_RANGE,
+                    ),
+                }
+            },
         }
     }
 
@@ -195,6 +256,11 @@ impl UserPreferences {
             "accent": self.accent_color.key(),
             "default_location": self.default_location.as_ref().map(|path| path.to_string_lossy()),
             "auto_calculate_folder_sizes": self.auto_calculate_folder_sizes,
+            "advanced": {
+                "preview_limit_kib": self.advanced.preview_limit_kib,
+                "csv_max_rows": self.advanced.csv_max_rows,
+                "csv_max_columns": self.advanced.csv_max_columns,
+            },
         });
         std::fs::write(path, serde_json::to_vec_pretty(&value)?)?;
         Ok(())
@@ -216,7 +282,7 @@ pub(crate) fn load_user_preferences() -> UserPreferences {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccentColor, ThemeMode, UserPreferences};
+    use super::{AccentColor, AdvancedSettings, ThemeMode, UserPreferences};
 
     #[test]
     /// Ensures system appearance follows the OS while explicit modes override it.
@@ -256,6 +322,7 @@ mod tests {
                 accent_color: AccentColor::Rose,
                 default_location: Some(location.clone()),
                 auto_calculate_folder_sizes: false,
+                advanced: AdvancedSettings::default(),
             };
             preferences.save(&path).unwrap();
             assert_eq!(UserPreferences::load(&path), preferences);
@@ -277,5 +344,36 @@ mod tests {
             preferences.save(&path).unwrap();
             assert_eq!(UserPreferences::load(&path).auto_calculate_folder_sizes, enabled);
         }
+    }
+
+    #[test]
+    fn advanced_preview_limits_round_trip_and_are_clamped() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let advanced = AdvancedSettings {
+            preview_limit_kib: 256,
+            csv_max_rows: 12_000,
+            csv_max_columns: 128,
+        };
+        let preferences = UserPreferences {
+            advanced,
+            ..UserPreferences::default()
+        };
+        preferences.save(&path).unwrap();
+        assert_eq!(UserPreferences::load(&path).advanced, advanced);
+
+        std::fs::write(
+            &path,
+            r#"{"advanced":{"preview_limit_kib":1,"csv_max_rows":999999,"csv_max_columns":0}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            UserPreferences::load(&path).advanced,
+            AdvancedSettings {
+                preview_limit_kib: *AdvancedSettings::PREVIEW_LIMIT_RANGE.start(),
+                csv_max_rows: *AdvancedSettings::CSV_MAX_ROWS_RANGE.end(),
+                csv_max_columns: *AdvancedSettings::CSV_MAX_COLUMNS_RANGE.start(),
+            }
+        );
     }
 }

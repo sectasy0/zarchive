@@ -14,6 +14,7 @@ use std::{
     },
 };
 
+#[cfg(test)]
 pub(crate) const MAX_BYTES: usize = 128 * 1024;
 
 pub(crate) struct GuardedReader<'a, R> {
@@ -73,9 +74,19 @@ pub(crate) enum PreviewData {
     Binary(HexPreview),
 }
 
+struct LoadedPreview {
+    data: PreviewData,
+    raw_bytes: Vec<u8>,
+}
+
+#[cfg(test)]
 fn hex_preview(bytes: &[u8]) -> HexPreview {
-    let truncated = bytes.len() > MAX_BYTES;
-    let bytes = &bytes[..bytes.len().min(MAX_BYTES)];
+    hex_preview_with_limit(bytes, MAX_BYTES)
+}
+
+fn hex_preview_with_limit(bytes: &[u8], max_bytes: usize) -> HexPreview {
+    let truncated = bytes.len() > max_bytes;
+    let bytes = &bytes[..bytes.len().min(max_bytes)];
     let rows = bytes
         .chunks(16)
         .enumerate()
@@ -108,7 +119,12 @@ struct CsvTable {
 }
 
 impl CsvTable {
+    #[cfg(test)]
     fn parse(content: &TextContent) -> Option<Self> {
+        Self::parse_with_limits(content, 5_000, 64)
+    }
+
+    fn parse_with_limits(content: &TextContent, max_rows: usize, max_columns: usize) -> Option<Self> {
         let delimiter = [b',', b';', b'\t'].into_iter().max_by_key(|delimiter| {
             let mut reader = csv::ReaderBuilder::new()
                 .delimiter(*delimiter)
@@ -140,15 +156,15 @@ impl CsvTable {
             if content.truncated && reader.position().byte() as usize >= content.text.len() {
                 break;
             }
-            if records.len() >= 5001 {
+            if records.len() >= max_rows.saturating_add(1) {
                 truncated = true;
                 break;
             }
-            truncated |= record.len() > 64;
+            truncated |= record.len() > max_columns;
             records.push(
                 record
                     .iter()
-                    .take(64)
+                    .take(max_columns)
                     .map(|cell| gpui::SharedString::from(cell.to_owned()))
                     .collect::<Vec<_>>(),
             );
@@ -161,7 +177,8 @@ impl CsvTable {
             .map(Vec::len)
             .max()
             .unwrap_or(0)
-            .max(headers.len());
+            .max(headers.len())
+            .min(max_columns);
         while headers.len() < columns {
             headers.push(gpui::SharedString::default());
         }
@@ -217,40 +234,110 @@ fn is_csv_target(target: &EntryTarget) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("csv"))
 }
 
+#[cfg(test)]
 pub(crate) fn load(
     target: &crate::file_actions::EntryTarget,
     cancel: &AtomicBool,
 ) -> anyhow::Result<PreviewData> {
+    load_with_settings(target, cancel, crate::preferences::AdvancedSettings::default())
+}
+
+#[cfg(test)]
+pub(crate) fn load_with_settings(
+    target: &crate::file_actions::EntryTarget,
+    cancel: &AtomicBool,
+    settings: crate::preferences::AdvancedSettings,
+) -> anyhow::Result<PreviewData> {
+    Ok(load_with_limit(target, cancel, settings.preview_max_bytes())?.data)
+}
+
+fn load_with_limit(
+    target: &crate::file_actions::EntryTarget,
+    cancel: &AtomicBool,
+    max_bytes: usize,
+) -> anyhow::Result<LoadedPreview> {
     let bytes = if let Some(entry) = &target.archive_entry {
-        crate::archive::read_entry_prefix(
+        crate::archive::read_entry_prefix_with_limit(
             &target.path,
             entry,
             target.password.as_ref().map(|password| password.as_str()),
             cancel,
+            max_bytes,
         )?
     } else if crate::archive::ResolvedFormat::from_path(&target.path)
         .is_some_and(|format| format.is_single_compressed())
     {
         let name = crate::archive::single_compressed_entry_name(&target.path)?;
-        crate::archive::read_entry_prefix(&target.path, &name, None, cancel)?
+        crate::archive::read_entry_prefix_with_limit(
+            &target.path,
+            &name,
+            None,
+            cancel,
+            max_bytes,
+        )?
     } else {
-        read_prefix(&mut std::fs::File::open(&target.path)?, cancel)?
+        read_prefix_with_limit(
+            &mut std::fs::File::open(&target.path)?,
+            cancel,
+            max_bytes,
+        )?
     };
-    Ok(match decode(&bytes) {
-        Some(content) => PreviewData::Text(content),
-        None => PreviewData::Binary(hex_preview(&bytes)),
-    })
+    Ok(loaded_preview_from_bytes(bytes, max_bytes))
 }
 
+fn loaded_preview_from_bytes(bytes: Vec<u8>, max_bytes: usize) -> LoadedPreview {
+    let raw_bytes = bytes[..bytes.len().min(max_bytes)].to_vec();
+    let data = match decode_with_limit(&bytes, max_bytes) {
+        Some(content) => PreviewData::Text(content),
+        None => PreviewData::Binary(hex_preview_with_limit(&bytes, max_bytes)),
+    };
+    LoadedPreview { data, raw_bytes }
+}
+
+fn load_remaining(
+    target: &EntryTarget,
+    cancel: &AtomicBool,
+    offset: usize,
+) -> anyhow::Result<Vec<u8>> {
+    if let Some(entry) = &target.archive_entry {
+        crate::archive::read_entry_from_offset(
+            &target.path,
+            entry,
+            target.password.as_ref().map(|password| password.as_str()),
+            cancel,
+            offset,
+        )
+    } else if crate::archive::ResolvedFormat::from_path(&target.path)
+        .is_some_and(|format| format.is_single_compressed())
+    {
+        let name = crate::archive::single_compressed_entry_name(&target.path)?;
+        crate::archive::read_entry_from_offset(&target.path, &name, None, cancel, offset)
+    } else {
+        use std::io::Seek;
+        let mut file = std::fs::File::open(&target.path)?;
+        file.seek(std::io::SeekFrom::Start(offset as u64))?;
+        Ok(read_prefix_with_limit(&mut file, cancel, usize::MAX)?)
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn read_prefix(reader: &mut impl Read, cancel: &AtomicBool) -> io::Result<Vec<u8>> {
+    read_prefix_with_limit(reader, cancel, MAX_BYTES)
+}
+
+pub(crate) fn read_prefix_with_limit(
+    reader: &mut impl Read,
+    cancel: &AtomicBool,
+    max_bytes: usize,
+) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     let mut buffer = [0; 8192];
-    while bytes.len() <= MAX_BYTES {
+    while bytes.len() <= max_bytes {
         crate::task_queue::checkpoint()?;
         if cancel.load(Ordering::Relaxed) {
             return Err(io::Error::from(io::ErrorKind::Interrupted));
         }
-        let length = buffer.len().min(MAX_BYTES + 1 - bytes.len());
+        let length = buffer.len().min(max_bytes.saturating_add(1).saturating_sub(bytes.len()));
         let count = reader.read(&mut buffer[..length])?;
         if count == 0 {
             break;
@@ -261,9 +348,37 @@ pub(crate) fn read_prefix(reader: &mut impl Read, cancel: &AtomicBool) -> io::Re
     Ok(bytes)
 }
 
+pub(crate) fn read_from_offset(
+    reader: &mut impl Read,
+    cancel: &AtomicBool,
+    offset: usize,
+) -> io::Result<Vec<u8>> {
+    let mut remaining = offset;
+    let mut buffer = [0; 8192];
+    while remaining > 0 {
+        crate::task_queue::checkpoint()?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(io::Error::from(io::ErrorKind::Interrupted));
+        }
+        let length = buffer.len().min(remaining);
+        let count = reader.read(&mut buffer[..length])?;
+        if count == 0 {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+        remaining -= count;
+        crate::task_queue::report_bytes(count as u64);
+    }
+    read_prefix_with_limit(reader, cancel, usize::MAX)
+}
+
+#[cfg(test)]
 pub(crate) fn decode(bytes: &[u8]) -> Option<TextContent> {
-    let truncated = bytes.len() > MAX_BYTES;
-    let bytes = &bytes[..bytes.len().min(MAX_BYTES)];
+    decode_with_limit(bytes, MAX_BYTES)
+}
+
+fn decode_with_limit(bytes: &[u8], max_bytes: usize) -> Option<TextContent> {
+    let truncated = bytes.len() > max_bytes;
+    let bytes = &bytes[..bytes.len().min(max_bytes)];
     let text = if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
         let little_endian = bytes[0] == 0xff;
         let data = &bytes[2..];
@@ -315,17 +430,23 @@ pub(crate) struct Preview {
     manager: gpui::WeakEntity<ArchiveManager>,
     content: Option<TextContent>,
     hex: Option<HexPreview>,
+    raw_bytes: Vec<u8>,
     editor: Option<gpui::Entity<EditorState>>,
     csv: Option<CsvTable>,
     hex_editor: Option<gpui::Entity<EditorState>>,
     error: Option<String>,
     editing: bool,
     saving: bool,
+    loading_more: bool,
+    load_more_error: Option<String>,
     cancel: Arc<AtomicBool>,
     task: Option<u64>,
     scroll: gpui::UniformListScrollHandle,
     pub theme: Theme,
     pub language: Language,
+    limits: crate::preferences::AdvancedSettings,
+
+
 }
 
 impl Drop for Preview {
@@ -351,6 +472,8 @@ impl ArchiveManager {
         let cancel = self.inspector.text_cancel.clone();
         let target = target.clone();
         let language = self.language;
+        let limits = self.advanced_settings;
+        let max_bytes = limits.preview_max_bytes();
         let worker_target = target.clone();
         let worker_cancel = cancel.clone();
         let preview = cx.new(|_: &mut Context<Preview>| Preview {
@@ -358,58 +481,76 @@ impl ArchiveManager {
             manager,
             content: None,
             hex: None,
+            raw_bytes: Vec::new(),
             editor: None,
             csv: None,
             hex_editor: None,
             error: None,
             editing: false,
             saving: false,
+            loading_more: false,
+            load_more_error: None,
             cancel: cancel.clone(),
             task: None,
             scroll: gpui::UniformListScrollHandle::new(),
             theme,
             language,
+            limits,
         });
         let view = preview.downgrade();
         let task_id = self.background_queue.enqueue(
+
+
             "Loading text preview...",
             crate::task_queue::TaskControl::with_cancel(cancel).for_paths([worker_target.path.clone()]),
             move |control, reporter| async move {
                 reporter.set(0, 1);
                 if !control.checkpoint() { anyhow::bail!("cancelled"); }
-                let result = match load(&worker_target, &worker_cancel)? {
-                    PreviewData::Text(content) => {
-                        let table = is_csv_target(&worker_target)
-                            .then(|| CsvTable::parse(&content))
-                            .flatten();
-                        (PreviewData::Text(content), table)
+                let loaded = load_with_limit(&worker_target, &worker_cancel, max_bytes)?;
+                let table = match &loaded.data {
+                    PreviewData::Text(content) if is_csv_target(&worker_target) => {
+                        CsvTable::parse_with_limits(
+                            content,
+                            limits.csv_max_rows as usize,
+                            limits.csv_max_columns as usize,
+                        )
                     }
-                    PreviewData::Binary(hex) => (PreviewData::Binary(hex), None),
+                    _ => None,
                 };
+                let result = (loaded, table);
                 reporter.set(1, 1);
+
+
                 if !control.checkpoint() { anyhow::bail!("cancelled"); }
                 Ok(result)
             },
             move |_, result, window, cx| {
+
+
                 let _ = view.update(cx, |preview, cx| {
                     if preview.cancel.load(Ordering::Relaxed) { preview.task = None; cx.notify(); return; }
                             match result {
-                                Ok((PreviewData::Text(content), table)) => {
-                                    if table.is_none() {
-                                        preview.editor = Some(cx.new(|cx| {
-                                            EditorState::new(window, cx)
-                                                .language(syntax_language(&preview.target))
-                                                .line_number(true)
-                                                .soft_wrap(false)
-                                                .scroll_bounce(false)
-                                                .scroll_beyond_last_line(Some(0))
-                                                .default_value(content.text.clone())
-                                        }));
+                                Ok((loaded, table)) => {
+                                    preview.raw_bytes = loaded.raw_bytes;
+                                    match loaded.data {
+                                        PreviewData::Text(content) => {
+                                            if table.is_none() {
+                                                preview.editor = Some(cx.new(|cx| {
+                                                    EditorState::new(window, cx)
+                                                        .language(syntax_language(&preview.target))
+                                                        .line_number(true)
+                                                        .soft_wrap(false)
+                                                        .scroll_bounce(false)
+                                                        .scroll_beyond_last_line(Some(0))
+                                                        .default_value(content.text.clone())
+                                                }));
+                                            }
+                                            preview.csv = table;
+                                            preview.content = Some(content);
+                                        }
+                                        PreviewData::Binary(hex) => preview.hex = Some(hex),
                                     }
-                                    preview.csv = table;
-                                    preview.content = Some(content);
                                 }
-                                Ok((PreviewData::Binary(hex), _)) => preview.hex = Some(hex),
                                 Err(crate::task_queue::TaskFailure::Cancelled) => {},
                                 Err(crate::task_queue::TaskFailure::Failed(error)) => preview.error = Some(format!("{error:#}")),
                             }
@@ -422,6 +563,87 @@ impl ArchiveManager {
         preview.update(cx, |preview, _| preview.task = Some(task_id));
         self.inspector.text_preview = Some(preview);
         cx.notify();
+    }
+
+    fn enqueue_preview_remainder(
+        &mut self,
+        target: EntryTarget,
+        prefix: Vec<u8>,
+        read_remainder: bool,
+        cancel: Arc<AtomicBool>,
+        preview: gpui::WeakEntity<Preview>,
+        cx: &mut Context<Self>,
+    ) {
+        let offset = prefix.len();
+        let worker_target = target.clone();
+        let worker_cancel = cancel.clone();
+        self.background_queue.enqueue(
+            "Loading remaining preview...",
+            crate::task_queue::TaskControl::with_cancel(cancel)
+                .for_paths([target.path.clone()]),
+            move |control, reporter| async move {
+                if !control.checkpoint() {
+                    anyhow::bail!("cancelled");
+                }
+                let remainder = if read_remainder {
+                    load_remaining(&worker_target, &worker_cancel, offset)?
+                } else {
+                    Vec::new()
+                };
+                let mut bytes = prefix;
+                bytes.extend_from_slice(&remainder);
+                let loaded = loaded_preview_from_bytes(bytes, usize::MAX);
+                let table = match &loaded.data {
+                    PreviewData::Text(content) if is_csv_target(&worker_target) => {
+                        CsvTable::parse_with_limits(content, usize::MAX, usize::MAX)
+                    }
+                    _ => None,
+                };
+                reporter.set(1, 1);
+                if !control.checkpoint() {
+                    anyhow::bail!("cancelled");
+                }
+                Ok((loaded, table))
+            },
+            move |_, result, window, cx| {
+                let _ = preview.update(cx, |preview, cx| {
+                    preview.loading_more = false;
+                    match result {
+                        Ok((loaded, table)) => {
+                            preview.raw_bytes = loaded.raw_bytes;
+                            preview.load_more_error = None;
+                            preview.csv = table;
+                            preview.editor = None;
+                            preview.content = None;
+                            preview.hex = None;
+                            match loaded.data {
+                                PreviewData::Text(content) => {
+                                    if preview.csv.is_none() {
+                                        preview.editor = Some(cx.new(|cx| {
+                                            EditorState::new(window, cx)
+                                                .language(syntax_language(&preview.target))
+                                                .line_number(true)
+                                                .soft_wrap(false)
+                                                .scroll_bounce(false)
+                                                .scroll_beyond_last_line(Some(0))
+                                                .default_value(content.text.clone())
+                                        }));
+                                    }
+                                    preview.content = Some(content);
+                                }
+                                PreviewData::Binary(hex) => preview.hex = Some(hex),
+                            }
+                        }
+                        Err(crate::task_queue::TaskFailure::Cancelled) => {}
+                        Err(crate::task_queue::TaskFailure::Failed(error)) => {
+                            preview.load_more_error = Some(format!("{error:#}"));
+                        }
+                    }
+                    cx.notify();
+                });
+            },
+            cx,
+        );
     }
 
     fn save_preview_contents(
@@ -520,6 +742,34 @@ impl ArchiveManager {
 }
 
 impl Preview {
+    fn load_remaining(&mut self, cx: &mut Context<Self>) {
+        if self.loading_more {
+            return;
+        }
+        self.loading_more = true;
+        self.load_more_error = None;
+        let target = self.target.clone();
+        let prefix = self.raw_bytes.clone();
+        let read_remainder = self
+            .content
+            .as_ref()
+            .is_some_and(|content| content.truncated)
+            || self.hex.as_ref().is_some_and(|hex| hex.truncated);
+        let cancel = self.cancel.clone();
+        let preview = cx.entity().downgrade();
+        let _ = self.manager.update(cx, |manager, cx| {
+            manager.enqueue_preview_remainder(
+                target,
+                prefix,
+                read_remainder,
+                cancel,
+                preview,
+                cx,
+            );
+        });
+        cx.notify();
+    }
+
     fn can_edit(&self) -> bool {
         let complete = self
             .content
@@ -543,6 +793,8 @@ impl Preview {
         if !self.can_edit() {
             return;
         }
+
+
         if let Some(hex) = &self.hex {
             let value = hex
                 .rows
@@ -598,7 +850,7 @@ impl Preview {
             let Some(editor) = &self.hex_editor else {
                 return;
             };
-            match parse_hex_bytes(editor.read(cx).value().as_str()) {
+            match parse_hex_bytes(editor.read(cx).value().as_str(), self.limits.preview_max_bytes()) {
                 Ok(contents) => contents,
                 Err(_) => {
                     self.error = Some(self.language.text("Invalid hex data").to_owned());
@@ -611,8 +863,12 @@ impl Preview {
                 return;
             };
             let text = editor.read(cx).value().to_string();
-            if text.len() > MAX_BYTES {
-                self.error = Some(self.language.text("Edited preview exceeds the 128 KiB limit").to_owned());
+            if text.len() > self.limits.preview_max_bytes() {
+                self.error = Some(
+                    self.language
+                        .text("Edited preview exceeds the configured size limit")
+                        .to_owned(),
+                );
                 cx.notify();
                 return;
             }
@@ -629,9 +885,9 @@ impl Preview {
     }
 }
 
-fn parse_hex_bytes(text: &str) -> anyhow::Result<Vec<u8>> {
+fn parse_hex_bytes(text: &str, max_bytes: usize) -> anyhow::Result<Vec<u8>> {
     let tokens: Vec<_> = text.split_whitespace().collect();
-    anyhow::ensure!(tokens.len() <= MAX_BYTES, "Hex data exceeds the 128 KiB limit");
+    anyhow::ensure!(tokens.len() <= max_bytes, "Hex data exceeds the configured preview limit");
     tokens
         .into_iter()
         .map(|token| {
@@ -640,6 +896,8 @@ fn parse_hex_bytes(text: &str) -> anyhow::Result<Vec<u8>> {
         })
         .collect()
 }
+
+
 
 impl Render for Preview {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -684,6 +942,7 @@ impl Render for Preview {
         } else {
             "Text preview"
         };
+        let can_edit = self.can_edit();
         div()
             .id("text-preview")
             .debug_selector(|| "text-preview".to_owned())
@@ -760,14 +1019,16 @@ impl Render for Preview {
                                 }
                             })),
                     )
-                    .when(!self.editing && self.can_edit(), |header| {
+                    .when(!self.editing && (self.content.is_some() || self.hex.is_some()), |header| {
                         header.child(
                             Button::new("edit-preview")
+                                .debug_selector(|| "edit-preview".to_owned())
                                 .ghost()
                                 .xsmall()
                                 .icon(gpui::assets::IconName::Pencil)
-                                .tooltip(language.text("Edit file"))
+                                .tooltip(language.text(if can_edit { "Edit file" } else { "Editing unavailable" }))
                                 .accessibility_label(language.text("Edit file"))
+                                .disabled(!can_edit)
                                 .on_click(cx.listener(|preview, _, window, cx| {
                                     preview.begin_editing(window, cx);
                                 })),
@@ -814,6 +1075,8 @@ impl Render for Preview {
                                     cx.notify();
                                 });
                             })),
+
+
                     ),
             )
             .when(
@@ -825,17 +1088,56 @@ impl Render for Preview {
                 |panel| {
                     panel.child(
                         div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
                             .px_3()
                             .py_1()
-                            .text_xs()
-                            .text_color(rgb(theme.muted_text))
                             .child(
-                                language
-                                    .text("Preview truncated to keep the application responsive"),
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .text_xs()
+                                    .text_color(rgb(theme.muted_text))
+                                    .child(
+                                        language.text(
+                                            "Preview truncated to keep the application responsive",
+                                        ),
+                                    ),
+                            )
+                            .child(
+                                Button::new("load-remaining-preview")
+                                    .debug_selector(|| "load-remaining-preview".to_owned())
+                                    .ghost()
+                                    .xsmall()
+                                    .label(language.text(if self.loading_more {
+                                        "Loading remaining content..."
+                                    } else {
+                                        "Load remaining content"
+                                    }))
+                                    .tooltip(language.text("May use significant memory"))
+                                    .disabled(self.loading_more)
+                                    .on_click(cx.listener(|preview, _, _, cx| {
+                                        preview.load_remaining(cx);
+                                    })),
                             ),
                     )
                 },
             )
+            .when_some(self.load_more_error.as_deref(), |panel, error| {
+                panel.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_xs()
+                        .text_color(rgb(if theme.window < 0x808080 {
+                            0xfca5a5
+                        } else {
+                            0xb91c1c
+                        }))
+                        .child(language.error_message(error)),
+                )
+            })
             .when(self.editing && self.error.is_some(), |panel| {
                 panel.child(
                     div()
@@ -1480,6 +1782,19 @@ mod tests {
         assert!(table.truncated);
     }
 
+    #[test]
+    fn csv_preview_uses_configured_limits() {
+        let content = TextContent {
+            text: "a,b,c\n1,2,3\n4,5,6\n7,8,9\n".into(),
+            truncated: false,
+        };
+        let table = CsvTable::parse_with_limits(&content, 2, 2).unwrap();
+        assert_eq!(table.rows.len(), 2);
+        assert_eq!(table.headers.len(), 2);
+        assert_eq!(table.rows[0].len(), 2);
+        assert!(table.truncated);
+    }
+
     #[gpui::test]
     fn text_preview_ui_handles_plain_archived_compressed_and_binary_files(
         cx: &mut gpui::TestAppContext,
@@ -1608,6 +1923,7 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("binary-preview-table").is_some());
         assert!(cx.debug_bounds("binary-preview-row-0").is_some());
+        assert!(cx.debug_bounds("edit-preview").is_some());
         assert!(cx.debug_bounds("binary-preview-ascii-0").unwrap().size.width >= px(220.0));
         assert!(cx.debug_bounds("binary-preview-table").unwrap().size.width >= px(720.0));
         let preview_bounds = cx.debug_bounds("text-preview").unwrap();
@@ -1636,8 +1952,10 @@ mod tests {
         use gpui::test::TestWindowExt;
         let directory = tempfile::tempdir().unwrap();
         let text_path = directory.path().join("notes.txt");
+        let csv_path = directory.path().join("data.csv");
         let binary_path = directory.path().join("payload.bin");
         std::fs::write(&text_path, b"before").unwrap();
+        std::fs::write(&csv_path, b"name,value\nitem,old\n").unwrap();
         std::fs::write(&binary_path, [0x00, 0x11, 0x22]).unwrap();
         let (view, cx) = crate::tests::component_window(cx, |_, cx| crate::tests::test_manager(cx));
 
@@ -1671,6 +1989,34 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(std::fs::read(&text_path).unwrap(), b"after");
+
+        target.name = "data.csv".into();
+        target.key = "data.csv".into();
+        target.path = csv_path.clone();
+        cx.update(|window, cx| {
+            view.update(cx, |manager, cx| manager.preview_text_target(&target, window, cx));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("csv-preview-table").is_some());
+        assert!(cx.debug_bounds("edit-preview").is_some());
+        cx.update(|window, cx| window.click("edit-preview", cx));
+        let csv_editor = cx.read(|cx| {
+            view.read(cx)
+                .inspector
+                .text_preview
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .editor
+                .clone()
+                .unwrap()
+        });
+        cx.update(|window, cx| {
+            csv_editor.update(cx, |editor, cx| editor.set_value("name,value\nitem,new\n", window, cx));
+            window.click("save-preview-edits", cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(std::fs::read(&csv_path).unwrap(), b"name,value\nitem,new\n");
 
         target.name = "payload.bin".into();
         target.key = "payload.bin".into();
@@ -1707,9 +2053,9 @@ mod tests {
         use std::io::Read;
         let directory = tempfile::tempdir().unwrap();
         let sources = tempfile::tempdir().unwrap();
-        let source = sources.path().join("notes.txt");
+        let source = sources.path().join("notes.csv");
         let archive = directory.path().join("notes.zip");
-        std::fs::write(&source, b"inside before").unwrap();
+        std::fs::write(&source, b"name,value\ninside,before\n").unwrap();
         crate::archive::create_archive(
             &archive,
             std::slice::from_ref(&source),
@@ -1717,10 +2063,10 @@ mod tests {
         )
         .unwrap();
         let target = EntryTarget {
-            name: "notes.txt".into(),
-            key: "notes.txt".into(),
+            name: "notes.csv".into(),
+            key: "notes.csv".into(),
             path: archive.clone(),
-            archive_entry: Some("notes.txt".into()),
+            archive_entry: Some("notes.csv".into()),
             password: None,
             is_directory: false,
         };
@@ -1733,6 +2079,8 @@ mod tests {
             view.update(cx, |manager, cx| manager.preview_text_target(&target, window, cx));
         });
         cx.run_until_parked();
+        assert!(cx.debug_bounds("csv-preview-table").is_some());
+        assert!(cx.debug_bounds("edit-preview").is_some());
         cx.update(|window, cx| window.click("edit-preview", cx));
         let editor = cx.read(|cx| {
             view.read(cx)
@@ -1746,15 +2094,15 @@ mod tests {
                 .unwrap()
         });
         cx.update(|window, cx| {
-            editor.update(cx, |editor, cx| editor.set_value("inside after", window, cx));
+            editor.update(cx, |editor, cx| editor.set_value("name,value\ninside,after\n", window, cx));
             window.click("save-preview-edits", cx);
         });
         cx.run_until_parked();
-        let mut saved = crate::archive::extract_entry(&archive, "notes.txt").unwrap();
+        let mut saved = crate::archive::extract_entry(&archive, "notes.csv").unwrap();
         let mut saved_bytes = Vec::new();
         saved.read_to_end(&mut saved_bytes).unwrap();
-        assert_eq!(saved_bytes, b"inside after");
-        assert!(!directory.path().join("notes.txt").exists());
+        assert_eq!(saved_bytes, b"name,value\ninside,after\n");
+        assert!(!directory.path().join("notes.csv").exists());
     }
 
     #[gpui::test]
@@ -1819,7 +2167,10 @@ mod tests {
             is_directory: false,
         };
         assert_eq!(load_text_preview(&target, &cancel).text, text);
-        for format in ResolvedFormat::CREATION_FORMATS {
+        for format in ResolvedFormat::CREATION_FORMATS
+            .into_iter()
+            .filter(|format| format.capabilities().can_create)
+        {
             let path = directory
                 .path()
                 .join(format!("preview.{}", format.extension()));
@@ -1890,6 +2241,122 @@ mod tests {
     }
 
     #[test]
+    fn preview_loads_only_the_missing_local_file_suffix() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("large.txt");
+        let expected = MAX_BYTES * 2;
+        std::fs::write(&path, vec![b'a'; expected]).unwrap();
+        let target = EntryTarget {
+            name: "large.txt".into(),
+            key: "large.txt".into(),
+            path,
+            archive_entry: None,
+            password: None,
+            is_directory: false,
+        };
+
+        let loaded = load_with_limit(
+            &target,
+            &AtomicBool::new(false),
+            crate::preferences::AdvancedSettings::default().preview_max_bytes(),
+        )
+        .unwrap();
+        assert_eq!(loaded.raw_bytes.len(), MAX_BYTES);
+        let remainder = load_remaining(&target, &AtomicBool::new(false), loaded.raw_bytes.len())
+            .unwrap();
+        assert_eq!(remainder.len(), expected - MAX_BYTES);
+        let mut bytes = loaded.raw_bytes;
+        bytes.extend(remainder);
+        let loaded = loaded_preview_from_bytes(bytes, usize::MAX);
+        let PreviewData::Text(content) = loaded.data else {
+            panic!("expected a text preview");
+        };
+        assert_eq!(content.text.len(), expected);
+        assert!(!content.truncated);
+    }
+
+    #[test]
+    fn preview_loads_only_the_missing_archive_entry_suffix() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("large.txt");
+        let archive = directory.path().join("large.zip");
+        let text = format!("{}🙂{}", "a".repeat(MAX_BYTES - 1), "b".repeat(MAX_BYTES));
+        std::fs::write(&source, text.as_bytes()).unwrap();
+        crate::archive::create_zip(&archive, std::slice::from_ref(&source)).unwrap();
+        let target = EntryTarget {
+            name: "large.txt".into(),
+            key: "large.txt".into(),
+            path: archive,
+            archive_entry: Some("large.txt".into()),
+            password: None,
+            is_directory: false,
+        };
+
+        let loaded = load_with_limit(
+            &target,
+            &AtomicBool::new(false),
+            crate::preferences::AdvancedSettings::default().preview_max_bytes(),
+        )
+        .unwrap();
+        let offset = loaded.raw_bytes.len();
+        let remainder = load_remaining(&target, &AtomicBool::new(false), offset).unwrap();
+        assert_eq!(remainder.len(), text.len() - offset);
+        let mut bytes = loaded.raw_bytes;
+        bytes.extend(remainder);
+        let loaded = loaded_preview_from_bytes(bytes, usize::MAX);
+        let PreviewData::Text(content) = loaded.data else {
+            panic!("expected a text preview");
+        };
+        assert_eq!(content.text, text);
+        assert!(!content.truncated);
+    }
+
+    #[gpui::test]
+    fn load_remaining_preview_button_appends_to_the_current_preview(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::test::TestWindowExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("large.txt");
+        let expected = MAX_BYTES * 2;
+        std::fs::write(&path, vec![b'a'; expected]).unwrap();
+        let target = EntryTarget {
+            name: "large.txt".into(),
+            key: "large.txt".into(),
+            path,
+            archive_entry: None,
+            password: None,
+            is_directory: false,
+        };
+        let (view, cx) =
+            crate::tests::component_window(cx, |_, cx| crate::tests::test_manager(cx));
+        cx.update(|window, cx| {
+            view.update(cx, |manager, cx| manager.preview_text_target(&target, window, cx));
+        });
+        cx.run_until_parked();
+        let preview = cx.read(|cx| {
+            let manager = view.read(cx);
+            let preview = manager.inspector.text_preview.as_ref().unwrap().clone();
+            assert_eq!(preview.read(cx).raw_bytes.len(), MAX_BYTES);
+            assert!(preview.read(cx).content.as_ref().unwrap().truncated);
+            preview
+        });
+        assert!(cx.debug_bounds("load-remaining-preview").is_some());
+
+        cx.update(|window, cx| window.click("load-remaining-preview", cx));
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            let current = manager.inspector.text_preview.as_ref().unwrap();
+            let content = current.read(cx).content.as_ref().unwrap();
+            assert_eq!(content.text.len(), expected);
+            assert!(!content.truncated);
+            assert_eq!(preview.read(cx).raw_bytes.len(), expected);
+        });
+        assert!(cx.debug_bounds("load-remaining-preview").is_none());
+    }
+
+    #[test]
     fn text_preview_decodes_unicode_and_rejects_binary() {
         for text in ["", "hello\nworld\t!", "Zażółć gęślą jaźń 中文 🙂"] {
             assert_eq!(decode(text.as_bytes()).unwrap().text, text);
@@ -1923,10 +2390,13 @@ mod tests {
 
     #[test]
     fn hex_editor_parser_accepts_byte_pairs_and_rejects_invalid_values() {
-        assert_eq!(parse_hex_bytes("00 01 ff\n10").unwrap(), [0x00, 0x01, 0xff, 0x10]);
-        assert!(parse_hex_bytes("0f f").is_err());
-        assert!(parse_hex_bytes("gg").is_err());
-        assert!(parse_hex_bytes(&"00 ".repeat(MAX_BYTES + 1)).is_err());
+        assert_eq!(
+            parse_hex_bytes("00 01 ff\n10", MAX_BYTES).unwrap(),
+            [0x00, 0x01, 0xff, 0x10]
+        );
+        assert!(parse_hex_bytes("0f f", MAX_BYTES).is_err());
+        assert!(parse_hex_bytes("gg", MAX_BYTES).is_err());
+        assert!(parse_hex_bytes(&"00 ".repeat(MAX_BYTES + 1), MAX_BYTES).is_err());
     }
 
     #[test]

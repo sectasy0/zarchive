@@ -40,7 +40,7 @@ pub enum ArchiveFormat {
     Tar,
     /// 7z archive.
     SevenZip,
-    /// RAR archive, supported for reading only.
+    /// RAR archive, written through the external `rar` command-line tool.
     Rar,
     /// CPIO archive.
     Cpio,
@@ -303,7 +303,7 @@ impl ResolvedFormat {
     ];
 
     /// Logical output choices presented by the creation form.
-    pub const CREATION_FORMATS: [Self; 14] = [
+    pub const CREATION_FORMATS: [Self; 15] = [
         Self::Zip,
         Self::Tar,
         Self::Cpio,
@@ -311,6 +311,7 @@ impl ResolvedFormat {
         Self::Pax,
         Self::Xar,
         Self::SevenZip,
+        Self::Rar,
         Self::Gzip,
         Self::Bzip2,
         Self::Xz,
@@ -371,10 +372,14 @@ impl ResolvedFormat {
                     ..FormatCapabilities::CREATEABLE_ARCHIVE
                 }
             }
-            (Some(ArchiveFormat::Rar), CompressionFormat::None, None) => FormatCapabilities {
-                can_modify: rar_program().is_some(),
-                ..FormatCapabilities::READ_ONLY_ARCHIVE
-            },
+            (Some(ArchiveFormat::Rar), CompressionFormat::None, None) => {
+                let available = rar_program().is_some();
+                FormatCapabilities {
+                    can_create: available,
+                    can_modify: available,
+                    ..FormatCapabilities::READ_ONLY_ARCHIVE
+                }
+            }
             (None, codec, None) if codec.supports_standalone() => {
                 FormatCapabilities::CREATEABLE_ARCHIVE
             }
@@ -439,7 +444,9 @@ impl ResolvedFormat {
             (Some(ArchiveFormat::Tar), _, None) => &[Fast, Normal, Best],
             (None, codec, None) if codec.supports_standalone() => &[Fast, Normal, Best],
             (Some(ArchiveFormat::SevenZip), CompressionFormat::None, None) => &[Fast, Normal, Best],
-            (Some(ArchiveFormat::Rar), CompressionFormat::None, None) => &[Stored],
+            (Some(ArchiveFormat::Rar), CompressionFormat::None, None) => {
+                &[Stored, Fast, Normal, Best]
+            }
             (
                 Some(ArchiveFormat::Cpio | ArchiveFormat::Ar | ArchiveFormat::Pax),
                 CompressionFormat::None,
@@ -978,17 +985,20 @@ fn create_archive_contents(
     allow_empty: bool,
 ) -> Result<()> {
     let format = options.output_format();
-    anyhow::ensure!(
-        format.capabilities().can_create,
-        "This format cannot be created"
-    );
+    if format == ResolvedFormat::Rar {
+        anyhow::ensure!(
+            rar_program().is_some(),
+            "Install the rar command-line tool to create RAR archives"
+        );
+    } else {
+        anyhow::ensure!(
+            format.capabilities().can_create,
+            "This format cannot be created"
+        );
+    }
     anyhow::ensure!(
         password.is_none() || format.supports_password(),
         "This format does not support encryption"
-    );
-    anyhow::ensure!(
-        format != ResolvedFormat::Rar,
-        "RAR archives cannot be created"
     );
     anyhow::ensure!(
         password.is_none_or(|password| !password.is_empty()),
@@ -1073,6 +1083,22 @@ fn create_archive_contents(
         Ok::<_, io::Error>(total.saturating_add(source.metadata()?.len()))
     })?;
     crate::task_queue::report_byte_total(total_bytes);
+    if format == ResolvedFormat::Rar {
+        let output = Builder::new()
+            .suffix(".rar")
+            .tempfile_in(&parent)
+            .context("Failed to create temporary RAR archive")?
+            .into_temp_path();
+        std::fs::remove_file(&output)?;
+        write_rar_archive(&output, &entries, options.compression)?;
+        File::open(&output)?.sync_all()?;
+        crate::task_queue::checkpoint()?;
+        output
+            .persist(path)
+            .map_err(|error| error.error)
+            .with_context(|| format!("Failed to save archive {}", path.display()))?;
+        return Ok(());
+    }
     let mut output =
         NamedTempFile::new_in(&parent).context("Failed to create temporary archive")?;
     match format {
@@ -1192,7 +1218,7 @@ fn create_archive_contents(
             }
             archive.finish()?;
         }
-        ResolvedFormat::Rar => anyhow::bail!("RAR archives cannot be created"),
+        ResolvedFormat::Rar => unreachable!("RAR archives use the external writer"),
         _ => anyhow::bail!("Unsupported resolved format for archive creation"),
     }
     output.as_file().sync_all()?;
@@ -1213,6 +1239,72 @@ fn rar_program() -> Option<&'static Path> {
         })
     });
     PROGRAM.as_deref()
+}
+
+fn write_rar_archive(
+    output: &Path,
+    entries: &[(PathBuf, String, bool)],
+    compression: CompressionLevel,
+) -> Result<()> {
+    let program = rar_program().context("Install the rar command-line tool to create RAR archives")?;
+    write_rar_archive_with_program(program, output, entries, compression)
+}
+
+fn write_rar_archive_with_program(
+    program: &Path,
+    output: &Path,
+    entries: &[(PathBuf, String, bool)],
+    compression: CompressionLevel,
+) -> Result<()> {
+    let staging = tempfile::tempdir()?;
+    let mut roots = BTreeSet::new();
+    for (source, name, is_directory) in entries {
+        crate::task_queue::checkpoint()?;
+        let relative = safe_extraction_path(name)?;
+        let root = relative
+            .components()
+            .next()
+            .context("Archive entry has no root name")?;
+        roots.insert(PathBuf::from(root.as_os_str()));
+        let destination = staging.path().join(relative);
+        if *is_directory {
+            std::fs::create_dir_all(destination)?;
+        } else {
+            std::fs::create_dir_all(destination.parent().context("Missing entry parent")?)?;
+            if std::fs::hard_link(source, &destination).is_err() {
+                crate::task_queue::copy(&mut File::open(source)?, &mut File::create(destination)?)?;
+            }
+        }
+    }
+    let compression = match compression {
+        CompressionLevel::Stored => 0,
+        CompressionLevel::Fast => 1,
+        CompressionLevel::Normal => 3,
+        CompressionLevel::Best => 5,
+    };
+    let result = std::process::Command::new(program)
+        .current_dir(staging.path())
+        .args([
+            "a",
+            "-idq",
+            "-o+",
+            "-p-",
+            "-r",
+            &format!("-m{compression}"),
+            "--",
+        ])
+        .arg(output)
+        .args(roots)
+        .output()?;
+    anyhow::ensure!(
+        result.status.success(),
+        "The RAR tool could not create this archive"
+    );
+    anyhow::ensure!(
+        output.metadata()?.len() > 0,
+        "The RAR tool created an empty archive"
+    );
+    Ok(())
 }
 
 pub(crate) fn can_add_to_archive(path: &Path) -> bool {
@@ -1949,14 +2041,49 @@ pub fn extract_entry(path: &Path, entry_name: &str) -> Result<NamedTempFile> {
     extract_entry_with_password(path, entry_name, None)
 }
 
-pub(crate) fn read_entry_prefix(
+pub(crate) fn read_entry_prefix_with_limit(
     path: &Path,
     entry_name: &str,
     password: Option<&str>,
     cancel: &std::sync::atomic::AtomicBool,
+    max_bytes: usize,
 ) -> Result<Vec<u8>> {
-    use crate::text_preview::{GuardedReader, read_prefix};
+    read_entry_range(path, entry_name, password, cancel, 0, max_bytes)
+}
+
+pub(crate) fn read_entry_from_offset(
+    path: &Path,
+    entry_name: &str,
+    password: Option<&str>,
+    cancel: &std::sync::atomic::AtomicBool,
+    offset: usize,
+) -> Result<Vec<u8>> {
+    read_entry_range(path, entry_name, password, cancel, offset, usize::MAX)
+}
+
+fn read_entry_range(
+    path: &Path,
+    entry_name: &str,
+    password: Option<&str>,
+    cancel: &std::sync::atomic::AtomicBool,
+    offset: usize,
+    max_bytes: usize,
+) -> Result<Vec<u8>> {
+    use crate::text_preview::{GuardedReader, read_from_offset, read_prefix_with_limit};
     use std::{cell::Cell, sync::atomic::Ordering};
+    fn read_entry_bytes(
+        reader: &mut impl Read,
+        cancel: &std::sync::atomic::AtomicBool,
+        offset: usize,
+        max_bytes: usize,
+    ) -> io::Result<Vec<u8>> {
+        if offset == 0 {
+            read_prefix_with_limit(reader, cancel, max_bytes)
+        } else {
+            read_from_offset(reader, cancel, offset)
+        }
+    }
+
     let format = ResolvedFormat::from_path(path).context("Unsupported archive format")?;
     let budget = Cell::new(64 * 1024 * 1024);
     let guarded = |reader| GuardedReader {
@@ -1969,9 +2096,11 @@ pub(crate) fn read_entry_prefix(
             entry_name == single_compressed_entry_name(path)?,
             "Archive entry not found"
         );
-        return Ok(read_prefix(
+        return Ok(read_entry_bytes(
             &mut guarded(decode_archive_stream(File::open(path)?, format)?),
             cancel,
+            offset,
+            max_bytes,
         )?);
     }
     if format.is_tar() {
@@ -1983,7 +2112,7 @@ pub(crate) fn read_entry_prefix(
                     entry.header().entry_type().is_file(),
                     "Only regular files are opened"
                 );
-                return Ok(read_prefix(&mut entry, cancel)?);
+                return Ok(read_entry_bytes(&mut entry, cancel, offset, max_bytes)?);
             }
         }
         anyhow::bail!("Archive entry not found or preview safety limit reached");
@@ -2003,7 +2132,7 @@ pub(crate) fn read_entry_prefix(
                         .is_some_and(|mode| mode & 0o170000 == 0o120000),
                 "Only regular files are opened"
             );
-            Ok(read_prefix(&mut entry, cancel)?)
+            Ok(read_entry_bytes(&mut entry, cancel, offset, max_bytes)?)
         }
         ResolvedFormat::SevenZip => {
             let file = File::open(path)?;
@@ -2059,7 +2188,10 @@ pub(crate) fn read_entry_prefix(
                     budget: &budget,
                 };
                 if entry.name() == entry_name && !entry.is_directory() {
-                    bytes = Some(read_prefix(&mut reader, cancel).map_err(sevenz_rust::Error::io)?);
+                    bytes = Some(
+                        read_entry_bytes(&mut reader, cancel, offset, max_bytes)
+                            .map_err(sevenz_rust::Error::io)?,
+                    );
                     Ok(false)
                 } else {
                     crate::task_queue::copy(&mut reader, &mut io::sink()).map_err(sevenz_rust::Error::io)?;
@@ -2076,7 +2208,12 @@ pub(crate) fn read_entry_prefix(
                 .find(|entry| entry.path == entry_name)
                 .cloned()
                 .context("Archive entry not found")?;
-            Ok(read_prefix(&mut archive.entry_reader(&entry)?, cancel)?)
+            Ok(read_entry_bytes(
+                &mut archive.entry_reader(&entry)?,
+                cancel,
+                offset,
+                max_bytes,
+            )?)
         }
         _ => {
             let mut archive = if let Some(password) = password {
@@ -2108,13 +2245,25 @@ pub(crate) fn read_entry_prefix(
                 );
                 let mut bytes = Vec::new();
                 let mut buffer = [0; 8192];
-                while bytes.len() <= crate::text_preview::MAX_BYTES {
+                let mut remaining = offset;
+                while remaining > 0 {
+                    if cancel.load(Ordering::Relaxed) {
+                        anyhow::bail!("Preview cancelled");
+                    }
+                    let length = buffer.len().min(remaining);
+                    let count = archive.read_data(&mut buffer[..length])?;
+                    if count == 0 {
+                        anyhow::bail!("Preview source changed while loading");
+                    }
+                    remaining -= count;
+                }
+                while bytes.len() <= max_bytes {
                     if cancel.load(Ordering::Relaxed) {
                         anyhow::bail!("Preview cancelled");
                     }
                     let length = buffer
                         .len()
-                        .min(crate::text_preview::MAX_BYTES + 1 - bytes.len());
+                        .min(max_bytes.saturating_add(1).saturating_sub(bytes.len()));
                     let count = archive.read_data(&mut buffer[..length])?;
                     if count == 0 {
                         break;
@@ -2961,7 +3110,7 @@ mod tests {
         std::fs::write(&second, b"remove second").unwrap();
         for format in super::ResolvedFormat::CREATION_FORMATS
             .into_iter()
-            .filter(|format| format.archive.is_some())
+            .filter(|format| format.archive.is_some() && format.capabilities().can_create)
         {
             let path = directory
                 .path()
@@ -3012,7 +3161,11 @@ mod tests {
         std::fs::write(addition.join("nested/文字.txt"), "new unicode").unwrap();
         for format in super::ResolvedFormat::CREATION_FORMATS
             .into_iter()
-            .filter(|format| format.archive.is_some() && *format != super::ResolvedFormat::Ar)
+            .filter(|format| {
+                format.archive.is_some()
+                    && *format != super::ResolvedFormat::Ar
+                    && format.capabilities().can_create
+            })
         {
             let path = directory
                 .path()
@@ -3096,6 +3249,70 @@ mod tests {
     }
 
     #[test]
+    fn rar_creation_is_listed_and_reports_a_missing_writer() {
+        assert!(ResolvedFormat::CREATION_FORMATS.contains(&ResolvedFormat::Rar));
+        assert_eq!(ResolvedFormat::Rar.compression_levels().len(), 4);
+        if super::rar_program().is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let source = directory.path().join("source.txt");
+            let output = directory.path().join("output.rar");
+            std::fs::write(&source, "RAR source").unwrap();
+            let error = create_archive(
+                &output,
+                &[source],
+                CreateOptions {
+                    format: ResolvedFormat::Rar,
+                    ..CreateOptions::default()
+                },
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("Install the rar command-line tool"));
+            assert!(!output.exists());
+            assert!(!ResolvedFormat::Rar.capabilities().can_create);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rar_writer_uses_staged_entry_names_and_compression_level() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("folder/nested/item.txt");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "RAR contents").unwrap();
+        let mut entries = Vec::new();
+        super::collect_archive_sources(
+            &directory.path().join("folder"),
+            "folder".into(),
+            true,
+            &mut std::collections::BTreeSet::new(),
+            &mut entries,
+        )
+        .unwrap();
+        let program = directory.path().join("rar-test-tool");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nset -eu\n[ \"$6\" = \"-m5\" ]\n[ \"$9\" = \"folder\" ]\n[ -f \"$9/nested/item.txt\" ]\nprintf 'fake RAR data' > \"$8\"\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&program, permissions).unwrap();
+        let output = directory.path().join("output.rar");
+
+        super::write_rar_archive_with_program(
+            &program,
+            &output,
+            &entries,
+            CompressionLevel::Best,
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read(output).unwrap(), b"fake RAR data");
+    }
+
+    #[test]
     fn replacing_archive_entry_preserves_other_files_in_zip_and_tar() {
         use std::io::Read;
         let directory = tempfile::tempdir().unwrap();
@@ -3171,7 +3388,7 @@ mod tests {
         std::fs::write(&second, "added 🙂").unwrap();
         for format in super::ResolvedFormat::CREATION_FORMATS
             .into_iter()
-            .filter(|format| format.archive.is_some())
+            .filter(|format| format.archive.is_some() && format.capabilities().can_create)
         {
             let path = directory
                 .path()

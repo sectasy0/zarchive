@@ -115,6 +115,154 @@ fn settings_category_button(
         )
 }
 
+#[derive(Clone, Copy)]
+enum AdvancedSettingField {
+    PreviewLimit,
+    CsvRows,
+    CsvColumns,
+}
+
+impl AdvancedSettingField {
+    fn key(self) -> &'static str {
+        match self {
+            Self::PreviewLimit => "preview-limit",
+            Self::CsvRows => "csv-row-limit",
+            Self::CsvColumns => "csv-column-limit",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::PreviewLimit => "Maximum preview size",
+            Self::CsvRows => "CSV preview row limit",
+            Self::CsvColumns => "CSV preview column limit",
+        }
+    }
+}
+
+fn advanced_setting_bounds(
+    manager: &ArchiveManager,
+    field: AdvancedSettingField,
+) -> (u32, u32, u32, &'static str) {
+    match field {
+        AdvancedSettingField::PreviewLimit => (
+            manager.advanced_settings.preview_limit_kib,
+            *AdvancedSettings::PREVIEW_LIMIT_RANGE.start(),
+            *AdvancedSettings::PREVIEW_LIMIT_RANGE.end(),
+            "KiB",
+        ),
+        AdvancedSettingField::CsvRows => (
+            manager.advanced_settings.csv_max_rows,
+            *AdvancedSettings::CSV_MAX_ROWS_RANGE.start(),
+            *AdvancedSettings::CSV_MAX_ROWS_RANGE.end(),
+            "",
+        ),
+        AdvancedSettingField::CsvColumns => (
+            manager.advanced_settings.csv_max_columns,
+            *AdvancedSettings::CSV_MAX_COLUMNS_RANGE.start(),
+            *AdvancedSettings::CSV_MAX_COLUMNS_RANGE.end(),
+            "",
+        ),
+    }
+}
+
+fn adjust_advanced_setting(
+    manager: &mut ArchiveManager,
+    field: AdvancedSettingField,
+    increase: bool,
+) {
+    let (value, minimum, maximum, _) = advanced_setting_bounds(manager, field);
+    let step = match field {
+        AdvancedSettingField::PreviewLimit => 16,
+        AdvancedSettingField::CsvRows => 500,
+        AdvancedSettingField::CsvColumns => 8,
+    };
+    let value = if increase {
+        value.saturating_add(step).min(maximum)
+    } else {
+        value.saturating_sub(step).max(minimum)
+    };
+    match field {
+        AdvancedSettingField::PreviewLimit => manager.advanced_settings.preview_limit_kib = value,
+        AdvancedSettingField::CsvRows => manager.advanced_settings.csv_max_rows = value,
+        AdvancedSettingField::CsvColumns => manager.advanced_settings.csv_max_columns = value,
+    }
+    manager.save_preferences();
+}
+
+fn advanced_setting_stepper(
+    manager: &ArchiveManager,
+    field: AdvancedSettingField,
+    theme: Theme,
+    cx: &mut Context<ArchiveManager>,
+) -> impl IntoElement {
+    let language = manager.language;
+    let (value, minimum, maximum, unit) = advanced_setting_bounds(manager, field);
+    let key = field.key();
+    div()
+        .id(gpui::SharedString::from(format!("advanced-setting-{key}")))
+        .debug_selector(move || format!("advanced-setting-{key}"))
+        .flex()
+        .items_center()
+        .gap_3()
+        .w_full()
+        .min_h(px(48.0))
+        .py_2()
+        .border_b_1()
+        .border_color(rgb(theme.subtle_border))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .text_sm()
+                .child(language.text(field.label())),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .flex_shrink_0()
+                .child(
+                    Button::new(gpui::SharedString::from(format!("advanced-{key}-decrease")))
+                        .ghost()
+                        .xsmall()
+                        .icon(gpui::assets::IconName::Minus)
+                        .tooltip(language.text("Decrease"))
+                        .accessibility_label(language.text("Decrease"))
+                        .disabled(value <= minimum)
+                        .on_click(cx.listener(move |manager, _, _, cx| {
+                            adjust_advanced_setting(manager, field, false);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .w(px(88.0))
+                        .text_center()
+                        .text_sm()
+                        .child(if unit.is_empty() {
+                            value.to_string()
+                        } else {
+                            format!("{value} {unit}")
+                        }),
+                )
+                .child(
+                    Button::new(gpui::SharedString::from(format!("advanced-{key}-increase")))
+                        .ghost()
+                        .xsmall()
+                        .icon(gpui::assets::IconName::Plus)
+                        .tooltip(language.text("Increase"))
+                        .accessibility_label(language.text("Increase"))
+                        .disabled(value >= maximum)
+                        .on_click(cx.listener(move |manager, _, _, cx| {
+                            adjust_advanced_setting(manager, field, true);
+                            cx.notify();
+                        })),
+                ),
+        )
+}
+
 fn folder_size_setting(
     manager: &ArchiveManager,
     theme: Theme,
@@ -190,10 +338,22 @@ fn settings_view(
         this.settings_category = SettingsCategory::Appearance;
         cx.notify();
     }));
+    let advanced_button = settings_category_button(
+        "settings-category-advanced",
+        language.text("Advanced"),
+        "toolbox",
+        category == SettingsCategory::Advanced,
+        theme,
+    )
+    .on_click(cx.listener(|this, _, _, cx| {
+        this.settings_category = SettingsCategory::Advanced;
+        cx.notify();
+    }));
 
     let page_title = match category {
         SettingsCategory::General => language.text("General"),
         SettingsCategory::Appearance => language.text("Appearance"),
+        SettingsCategory::Advanced => language.text("Advanced"),
     };
     let mut page = div()
         .id("settings-category-content")
@@ -383,6 +543,27 @@ fn settings_view(
                         )),
                 );
         }
+        SettingsCategory::Advanced => {
+            page = page
+                .child(advanced_setting_stepper(
+                    manager,
+                    AdvancedSettingField::PreviewLimit,
+                    theme,
+                    cx,
+                ))
+                .child(advanced_setting_stepper(
+                    manager,
+                    AdvancedSettingField::CsvRows,
+                    theme,
+                    cx,
+                ))
+                .child(advanced_setting_stepper(
+                    manager,
+                    AdvancedSettingField::CsvColumns,
+                    theme,
+                    cx,
+                ));
+        }
     }
 
     div()
@@ -402,8 +583,9 @@ fn settings_view(
                 .flex_col()
                 .gap_1()
                 .child(general_button)
-                .child(appearance_button),
-        )
+                .child(appearance_button)
+                .child(advanced_button),
+            )
         .child(page)
 }
 
