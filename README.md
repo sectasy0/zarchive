@@ -160,11 +160,35 @@ older `backup.rar`/`backup.r00` naming scheme. Opening a later recognized volume
 starts from the first part. Directory searches inspect only the first volume
 to avoid duplicate results.
 
-Multipart archives are read-only: adding, replacing, and removing entries are
-disabled. Creation still produces a single archive file. Native split ZIP sets
-using `.z01`, `.z02`, and a final `.zip` are not supported; they differ from
-byte-split `.zip.001` archives. Missing numbered volumes are reported rather
-than silently skipped. A set is limited to 10,000 parts.
+To create a multipart ZIP, 7z, or TAR archive (including compressed TAR), enable
+**Split into volumes** directly in the creation dialog.
+Choose 100 MB, 250 MB, 500 MB, 1 GB, 2 GB, or 4 GB, or enter a custom size in MB
+or GB. Units are decimal: 1 MB is 1,000,000 bytes and 1 GB is 1,000,000,000 bytes.
+Decimal custom values are accepted when they represent a whole number of bytes.
+Saving `backup.zip` produces `backup.zip.001`, `backup.zip.002`, and so on; the
+last part may be smaller. The application opens the first part after creation.
+
+Creation writes a temporary archive, then stages the volumes and publishes them
+without overwriting existing files. Failure or cancellation during splitting or
+publication removes parts published by that attempt; completed sets are kept.
+Keep the companion `backup.zip.volumes.json`
+with the parts: it records their names, count, lengths, and SHA-256 checksums,
+not passwords or file contents. This manifest is not a signature or proof of
+authenticity. Opening checks completeness and lengths,
+including a missing final part. Integrity checks and audits verify every part's
+checksum, subject to the normal inspection limits; an incomplete verification
+is not reported as passed. Without a manifest, external numbered archives remain
+readable and are verified through the archive format's existing integrity checks.
+
+Volume support is a separate format capability: ZIP, 7z, and TAR creation use
+numbered byte streams, not a native multi-disk ZIP implementation. Native RAR
+volumes are readable, but volume creation through the external RAR tool is not
+enabled. Other formats retain numbered-volume reading without offering volume
+creation. Native split ZIP sets using `.z01`, `.z02`, and a final `.zip` remain
+unsupported. A set is limited to 10,000 parts.
+
+Existing multipart archives remain read-only: adding, replacing, and removing
+entries are disabled.
 
 ### Updating Existing Archives
 

@@ -574,6 +574,7 @@ impl Render for ArchiveManager {
     /// Synchronizes app services and renders the titlebar, browser, sidebar, and inspector.
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         ui::prepare(self, window, cx);
+        creation::prepare(self, window, cx);
         secret::prepare(self, window, cx);
         operations::prepare(self, window, cx);
         toolbar::prepare_search(self, window, cx);

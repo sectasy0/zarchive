@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use gpui::{App, Context, IntoElement, Window, div, prelude::*, px, rgb};
+use gpui::{App, Context, Entity, IntoElement, Subscription, Window, div, prelude::*, px, rgb};
 
 use crate::archive::{
     self, ArchiveFormat, CompressionFormat, CompressionLevel, CreateOptions, ResolvedFormat,
@@ -12,7 +12,10 @@ use gpui::component::checkbox::Checkbox;
 use gpui::component::{
     Disableable, Sizable,
     button::{Button, ButtonVariants},
+    input::{Input, InputEvent, InputState},
 };
+
+pub(crate) const VOLUME_PRESETS: [u64; 6] = [100_000_000, 250_000_000, 500_000_000, 1_000_000_000, 2_000_000_000, 4_000_000_000];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 /// Identifies which creation-form choice is being read or updated.
@@ -25,6 +28,8 @@ pub(crate) enum ChoiceField {
     CompressionFormat,
     /// 7z dictionary size in mebibytes.
     Dictionary,
+    VolumeSize,
+    VolumeUnit,
 }
 
 /// Stores the selected sources, output options, encryption fields, and validation error.
@@ -41,6 +46,12 @@ pub(crate) struct ArchiveCreationForm {
     pub password: crate::secret::SecretInput,
     /// Password confirmation entered for encryption.
     pub confirmation: crate::secret::SecretInput,
+    split: bool,
+    volume_preset: usize,
+    volume_unit: usize,
+    custom_volume_size: String,
+    volume_input: Option<Entity<InputState>>,
+    volume_subscription: Option<Subscription>,
 }
 
 impl ArchiveCreationForm {
@@ -69,6 +80,12 @@ impl ArchiveCreationForm {
             encrypt: false,
             password: crate::secret::SecretInput::new(cx),
             confirmation: crate::secret::SecretInput::new(cx),
+            split: false,
+            volume_preset: 0,
+            volume_unit: 0,
+            custom_volume_size: "100".to_owned(),
+            volume_input: None,
+            volume_subscription: None,
         }
     }
 
@@ -94,6 +111,8 @@ impl ArchiveCreationForm {
                 .iter()
                 .position(|size| *size == self.options.dictionary_mib)
                 .unwrap_or(1),
+            ChoiceField::VolumeSize => self.volume_preset,
+            ChoiceField::VolumeUnit => self.volume_unit,
         }
     }
 
@@ -102,6 +121,10 @@ impl ArchiveCreationForm {
         match field {
             ChoiceField::Format => {
                 self.options.format = ResolvedFormat::CREATION_FORMATS[index];
+                if !self.options.format.capabilities().volumes.can_create {
+                    self.split = false;
+                    self.options.volume_size = None;
+                }
                 if !self.options.format.supports_password() {
                     self.encrypt = false;
                     self.password.clear();
@@ -125,8 +148,27 @@ impl ArchiveCreationForm {
                 self.update_compression_level();
             }
             ChoiceField::Dictionary => self.options.dictionary_mib = [1, 8, 32, 64][index],
+            ChoiceField::VolumeSize => self.volume_preset = index,
+            ChoiceField::VolumeUnit => self.volume_unit = index,
         }
         self.error = None;
+    }
+
+    fn resolved_options(&self) -> Result<CreateOptions, &'static str> {
+        let mut options = self.options;
+        options.volume_size = if self.split {
+            if !options.format.capabilities().volumes.can_create {
+                return Err("This format cannot create volumes");
+            }
+            Some(if let Some(size) = VOLUME_PRESETS.get(self.volume_preset) {
+                *size
+            } else if self.volume_preset == VOLUME_PRESETS.len() {
+                parse_volume_size(&self.custom_volume_size, self.volume_unit)?
+            } else {
+                return Err("Enter a valid volume size");
+            })
+        } else { None };
+        Ok(options)
     }
 
     fn update_compression_level(&mut self) {
@@ -162,6 +204,43 @@ impl ArchiveCreationForm {
         }
         Ok(())
     }
+}
+
+fn parse_volume_size(text: &str, unit: usize) -> Result<u64, &'static str> {
+    let error = "Enter a valid volume size";
+    let multiplier = *[1_000_000u128, 1_000_000_000].get(unit).ok_or(error)?;
+    let text = text.trim();
+    if text.len() > 32 { return Err(error); }
+    let (whole, fraction) = text.split_once(['.', ',']).unwrap_or((text, ""));
+    if !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit()) || fraction.len() > 9 { return Err(error); }
+    let whole = if whole.is_empty() { 0 } else { whole.parse::<u128>().map_err(|_| error)? };
+    let fraction_value = if fraction.is_empty() { 0 } else { fraction.parse::<u128>().map_err(|_| error)? };
+    let denominator = 10u128.pow(fraction.len() as u32);
+    let fraction_bytes = fraction_value.checked_mul(multiplier).ok_or(error)?;
+    if fraction_bytes % denominator != 0 { return Err(error); }
+    let bytes = whole.checked_mul(multiplier).and_then(|bytes| bytes.checked_add(fraction_bytes / denominator)).ok_or(error)?;
+    u64::try_from(bytes).ok().filter(|bytes| *bytes > 0).ok_or(error)
+}
+
+pub(crate) fn prepare(manager: &mut ArchiveManager, window: &mut Window, cx: &mut Context<ArchiveManager>) {
+    let form = &mut manager.creation;
+    if let Some(state) = &form.volume_input {
+        if state.read(cx).value().as_ref() != form.custom_volume_size {
+            state.update(cx, |state, cx| state.set_value(form.custom_volume_size.clone(), window, cx));
+        }
+        return;
+    }
+    let state = cx.new(|cx| InputState::new(window, cx).default_value(form.custom_volume_size.clone()));
+    let subscription = cx.subscribe_in(&state, window, |this, state, event, _, cx| {
+        if matches!(event, InputEvent::Change) {
+            this.creation.custom_volume_size = state.read(cx).value().to_string();
+            this.creation.error = None;
+            cx.notify();
+        }
+    });
+    form.volume_input = Some(state);
+    form.volume_subscription = Some(subscription);
 }
 
 impl ArchiveManager {
@@ -204,7 +283,14 @@ impl ArchiveManager {
             cx.notify();
             return;
         }
-        let options = self.creation.options;
+        let options = match self.creation.resolved_options() {
+            Ok(options) => options,
+            Err(key) => {
+                self.creation.error = Some(self.language.text(key).to_owned());
+                cx.notify();
+                return;
+            }
+        };
         let format = options.output_format();
         let extension = format.extension();
         let mut dialog = rfd::FileDialog::new()
@@ -258,6 +344,8 @@ impl ArchiveManager {
             .encrypt
             .then(|| std::sync::Arc::new(self.creation.password.text.clone()));
         let write_password = password.clone();
+        let archive_path = options.first_output_path(&output);
+        let read_path = archive_path.clone();
         let path = output.clone();
         let work_path = path.clone();
         let total_sources = sources.len() as u64;
@@ -265,7 +353,7 @@ impl ArchiveManager {
         self.status_message = None;
         let task_id = self.background_queue.enqueue(
             "Creating archive...",
-            crate::task_queue::TaskControl::default().for_paths(std::iter::once(output.clone()).chain(sources.clone())),
+            crate::task_queue::TaskControl::default().for_paths([output.clone(), archive_path.clone()].into_iter().chain(sources.clone())),
             move |control, reporter| async move {
                 reporter.phase("Creating archive...");
                 reporter.set(0, total_sources.max(1));
@@ -280,7 +368,7 @@ impl ArchiveManager {
                 if !control.checkpoint() { anyhow::bail!("cancelled"); }
                 reporter.set(total_sources.max(1), total_sources.max(1));
                 archive::list_archive_with_password(
-                    &work_path,
+                    &read_path,
                     write_password.as_ref().map(|password| password.as_str()),
                 )
             },
@@ -291,11 +379,11 @@ impl ArchiveManager {
                         this.creation.sources.clear();
                         this.creation.password.clear();
                         this.creation.confirmation.clear();
-                        this.install_archive(output.clone(), entries, password, cx);
+                        this.install_archive(archive_path.clone(), entries, password, cx);
                         this.status_message = Some(format!(
                             "{} {}",
                             this.language.text("Created"),
-                            output.display()
+                            archive_path.display()
                         ));
                     }
                     Err(crate::task_queue::TaskFailure::Cancelled) => {},
@@ -560,6 +648,28 @@ pub(crate) fn view(
                     })
             })
         })
+        .when(form.options.format.capabilities().volumes.can_create, |this| {
+            this.child(toggle("split-into-volumes", language.text("Split into volumes"), form.split, theme, cx, |form| {
+                    form.split = !form.split;
+                }))
+                .when(form.split, |this| {
+                    this.child(language.text("Volume size"))
+                        .child(choice_view(ChoiceField::VolumeSize, manager, theme, cx))
+                        .when(form.volume_preset == VOLUME_PRESETS.len(), |this| {
+                            this.child(div().flex().gap_2().items_center()
+                                .child(div().id("creation-custom-volume-size")
+                                    .debug_selector(|| "creation-custom-volume-size".to_owned())
+                                    .flex_1().min_w(px(0.0))
+                                    .child(Input::new(form.volume_input.as_ref().expect("volume input initialized"))
+                                        .id("custom-volume-size")
+                                        .accessibility_id("custom-volume-size")
+                                        .aria_label(language.text("Custom size"))
+                                        .small()))
+                                .child(div().w(px(92.0)).flex_shrink_0()
+                                    .child(choice_view(ChoiceField::VolumeUnit, manager, theme, cx))))
+                        })
+                })
+        })
         .child(
             Checkbox::new("include-hidden-files")
                 .debug_selector(|| "include-hidden-files".to_owned())
@@ -616,6 +726,129 @@ mod tests {
     use crate::Modal;
     use gpui::Modifiers;
 
+    #[test]
+    fn custom_volume_sizes_are_exact_and_validated() {
+        assert_eq!(parse_volume_size("100", 0), Ok(100_000_000));
+        assert_eq!(parse_volume_size("4", 1), Ok(4_000_000_000));
+        assert_eq!(parse_volume_size("1,5", 0), Ok(1_500_000));
+        assert_eq!(parse_volume_size("0.000001", 0), Ok(1));
+        assert_eq!(parse_volume_size("18446744073.709551615", 1), Ok(u64::MAX));
+        for value in ["", "0", "-1", "abc", "1e3", "NaN", "1 MB", ".", "1.2.3", "0.0000001", "18446744073.709551616"] {
+            assert!(parse_volume_size(value, 0).is_err(), "{value}");
+        }
+        assert!(parse_volume_size("1", 2).is_err());
+    }
+
+    #[gpui::test]
+    fn volume_presets_resolve_and_unsupported_formats_clear_splitting(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut form = ArchiveCreationForm::new(cx);
+            assert!(!form.split);
+            assert!(form.resolved_options().unwrap().volume_size.is_none());
+            form.split = true;
+            for (index, size) in [100_000_000, 250_000_000, 500_000_000, 1_000_000_000, 2_000_000_000, 4_000_000_000].into_iter().enumerate() {
+                form.apply(ChoiceField::VolumeSize, index);
+                assert_eq!(form.resolved_options().unwrap().volume_size, Some(size));
+            }
+            form.apply(ChoiceField::VolumeSize, VOLUME_PRESETS.len());
+            form.custom_volume_size = "0.001".to_owned();
+            assert_eq!(form.resolved_options().unwrap().volume_size, Some(1000));
+            form.apply(ChoiceField::VolumeUnit, 1);
+            assert_eq!(form.resolved_options().unwrap().volume_size, Some(1_000_000));
+            form.custom_volume_size = "invalid".to_owned();
+            assert!(form.resolved_options().is_err());
+            form.apply(ChoiceField::Format, ResolvedFormat::CREATION_FORMATS.iter().position(|format| *format == ResolvedFormat::Cpio).unwrap());
+            assert!(!form.split);
+            assert!(form.resolved_options().unwrap().volume_size.is_none());
+        });
+    }
+
+    fn click_control(cx: &mut gpui::VisualTestContext, id: &'static str) {
+        let bounds = cx.debug_bounds(id).unwrap_or_else(|| panic!("missing {id}"));
+        cx.simulate_mouse_move(bounds.center(), None, Modifiers::default());
+        cx.simulate_click(bounds.center(), Modifiers::default());
+    }
+
+    #[gpui::test]
+    fn volume_checkbox_is_visible_and_accepts_custom_sizes(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = crate::tests::component_window(cx, |window, cx| {
+            let mut manager = crate::tests::test_manager(cx);
+            manager.show_modal(Modal::CreateArchive, window, cx);
+            manager
+        });
+        assert!(cx.debug_bounds("split-into-volumes").is_some());
+        assert!(cx.debug_bounds("creation-volume-size").is_none());
+        click_control(cx, "split-into-volumes");
+        click_control(cx, "creation-volume-size");
+        for _ in 0..3 { cx.simulate_keystrokes("down"); }
+        cx.simulate_keystrokes("enter");
+        cx.read(|cx| assert_eq!(view.read(cx).creation.resolved_options().unwrap().volume_size, Some(1_000_000_000)));
+        click_control(cx, "creation-volume-size");
+        for _ in 0..3 { cx.simulate_keystrokes("down"); }
+        cx.simulate_keystrokes("enter");
+        click_control(cx, "creation-custom-volume-size");
+        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_input("0.001");
+        cx.read(|cx| assert_eq!(view.read(cx).creation.resolved_options().unwrap().volume_size, Some(1000)));
+        click_control(cx, "creation-volume-unit");
+        cx.simulate_keystrokes("down enter");
+        cx.read(|cx| assert_eq!(view.read(cx).creation.resolved_options().unwrap().volume_size, Some(1_000_000)));
+        click_control(cx, "creation-custom-volume-size");
+        cx.simulate_keystrokes("cmd-a");
+        cx.simulate_input("invalid");
+        cx.read(|cx| assert!(view.read(cx).creation.resolved_options().is_err()));
+        click_control(cx, "split-into-volumes");
+        assert!(cx.debug_bounds("split-into-volumes").is_some());
+        assert!(cx.debug_bounds("creation-volume-size").is_none());
+        view.update(cx, |manager, cx| {
+            manager.creation.apply(ChoiceField::Format, ResolvedFormat::CREATION_FORMATS.iter().position(|format| *format == ResolvedFormat::Cpio).unwrap());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("split-into-volumes").is_none());
+    }
+
+    #[gpui::test]
+    fn volume_creation_installs_first_part_after_background_completion(cx: &mut gpui::TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("private.txt");
+        let contents = b"private split archive payload".repeat(200);
+        std::fs::write(&source, &contents).unwrap();
+        let output = root.path().join("protected.zip");
+        let (view, cx) = crate::tests::component_window(cx, |window, cx| {
+            let mut manager = crate::tests::test_manager(cx);
+            manager.creation.sources.push(source.clone());
+            manager.creation.options.compression = CompressionLevel::Stored;
+            manager.creation.split = true;
+            manager.creation.volume_preset = VOLUME_PRESETS.len();
+            manager.creation.custom_volume_size = "0.001".to_owned();
+            manager.creation.encrypt = true;
+            manager.creation.password.text.push_str("volume-password");
+            manager.creation.confirmation.text.push_str("volume-password");
+            manager.show_modal(Modal::CreateArchive, window, cx);
+            manager
+        });
+        cx.update(|window, cx| view.update(cx, |manager, cx| {
+            let options = manager.creation.resolved_options().unwrap();
+            manager.start_archive_creation(output.clone(), options, window, cx);
+            manager.close_modal(window, cx);
+        }));
+        cx.run_until_parked();
+        let first = crate::volumes::part_path(&output, 1);
+        assert!(!output.exists());
+        assert!(crate::volumes::part_path(&output, 2).is_file());
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert!(manager.creation_task.is_none());
+            assert!(manager.creation.error.is_none(), "{:?}", manager.creation.error);
+            assert_eq!(manager.archive_path.as_ref(), Some(&first));
+            assert!(manager.archive_password.is_some());
+            assert_eq!(manager.entries[0].name, "private.txt");
+        });
+        assert!(archive::list_archive(&first).is_err());
+        assert!(archive::list_archive_with_password(&first, Some("volume-password")).is_ok());
+    }
+
     #[gpui::test]
     fn generated_passwords_are_random_confirmed_and_cleared(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
@@ -654,6 +887,8 @@ mod tests {
                 .collect();
             manager.creation.options.format = ResolvedFormat::SevenZip;
             manager.creation.encrypt = true;
+            manager.creation.split = true;
+            manager.creation.volume_preset = VOLUME_PRESETS.len();
             manager.show_modal(Modal::CreateArchive, window, cx);
             manager
         });
@@ -963,6 +1198,8 @@ fn choice_view(
             ChoiceField::Compression => crate::ui::Selector::Compression,
             ChoiceField::CompressionFormat => crate::ui::Selector::CompressionFormat,
             ChoiceField::Dictionary => crate::ui::Selector::Dictionary,
+            ChoiceField::VolumeSize => crate::ui::Selector::VolumeSize,
+            ChoiceField::VolumeUnit => crate::ui::Selector::VolumeUnit,
         },
     )
 }

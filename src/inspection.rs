@@ -453,6 +453,9 @@ fn inspect_inner(
     let metadata = std::fs::metadata(&report.path)?;
     let file = archive::open_archive_reader(&report.path)?;
     report.archive_size = file.len();
+    if mode != InspectionMode::Preview {
+        report.limited |= !crate::volumes::verify(&report.path, cancel, mode.max_total_bytes())?;
+    }
     report.created = metadata.created().ok().map(format_system_time);
     report.modified = metadata.modified().ok().map(format_system_time);
     report.accessed = metadata.accessed().ok().map(format_system_time);

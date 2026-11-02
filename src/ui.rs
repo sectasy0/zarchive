@@ -26,6 +26,8 @@ pub enum Selector {
     CompressionFormat,
     /// 7z dictionary-size selector.
     Dictionary,
+    VolumeSize,
+    VolumeUnit,
 }
 
 /// Retains selector options, selected index, and its event subscription.
@@ -118,6 +120,8 @@ impl Controls {
                             this.creation.apply(ChoiceField::CompressionFormat, index)
                         }
                         Selector::Dictionary => this.creation.apply(ChoiceField::Dictionary, index),
+                        Selector::VolumeSize => this.creation.apply(ChoiceField::VolumeSize, index),
+                        Selector::VolumeUnit => this.creation.apply(ChoiceField::VolumeUnit, index),
                     }
                     cx.notify();
                 }
@@ -383,6 +387,16 @@ pub fn prepare(
         window,
         cx,
     );
+    manager.controls.sync(
+        Selector::VolumeSize,
+        ["100 MB", "250 MB", "500 MB", "1 GB", "2 GB", "4 GB"].into_iter()
+            .map(SharedString::from).chain(std::iter::once(language.text("Custom size").into())).collect(),
+        manager.creation.selected(ChoiceField::VolumeSize), window, cx,
+    );
+    manager.controls.sync(
+        Selector::VolumeUnit, ["MB", "GB"].map(SharedString::from).to_vec(),
+        manager.creation.selected(ChoiceField::VolumeUnit), window, cx,
+    );
 }
 
 /// Renders one retained selector with its localized accessibility label.
@@ -394,6 +408,8 @@ pub fn select(manager: &ArchiveManager, selector: Selector) -> impl IntoElement 
         Selector::Compression => ("creation-compression", "Compression"),
         Selector::CompressionFormat => ("creation-tar-compression", "Compression method"),
         Selector::Dictionary => ("creation-dictionary", "Dictionary size"),
+        Selector::VolumeSize => ("creation-volume-size", "Volume size"),
+        Selector::VolumeUnit => ("creation-volume-unit", "Size unit"),
     };
     let selected = match &control.state {
         SelectStateHandle::Flat(state) => Select::new(state)

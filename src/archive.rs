@@ -204,6 +204,13 @@ impl ContainerFormat {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VolumeCapabilities {
+    pub can_read: bool,
+    pub can_create: bool,
+    pub native: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 /// Operations currently implemented for a resolved file format.
 pub struct FormatCapabilities {
     /// Whether archive metadata can be listed.
@@ -216,6 +223,7 @@ pub struct FormatCapabilities {
     pub can_modify: bool,
     /// Whether integrity/content checks are available.
     pub can_test: bool,
+    pub volumes: VolumeCapabilities,
 }
 
 impl FormatCapabilities {
@@ -225,6 +233,7 @@ impl FormatCapabilities {
         can_create: false,
         can_modify: false,
         can_test: true,
+        volumes: VolumeCapabilities { can_read: false, can_create: false, native: false },
     };
 
     const CREATEABLE_ARCHIVE: Self = Self {
@@ -233,6 +242,7 @@ impl FormatCapabilities {
         can_create: true,
         can_modify: false,
         can_test: true,
+        volumes: VolumeCapabilities { can_read: false, can_create: false, native: false },
     };
 }
 
@@ -363,7 +373,7 @@ impl ResolvedFormat {
 
     /// Returns supported operations for this exact archive, codec, or image combination.
     pub fn capabilities(self) -> FormatCapabilities {
-        match (self.archive, self.compression, self.container) {
+        let mut capabilities = match (self.archive, self.compression, self.container) {
             (Some(archive), codec, None)
                 if archive.can_create()
                     && (archive == ArchiveFormat::Tar || codec == CompressionFormat::None) =>
@@ -385,7 +395,16 @@ impl ResolvedFormat {
                 FormatCapabilities::CREATEABLE_ARCHIVE
             }
             _ => FormatCapabilities::default(),
-        }
+        };
+        capabilities.volumes = match (self.archive, self.compression, self.container) {
+            (Some(ArchiveFormat::Zip | ArchiveFormat::SevenZip | ArchiveFormat::Tar), _, None)
+                if capabilities.can_create => VolumeCapabilities { can_read: true, can_create: true, native: false },
+            (Some(ArchiveFormat::Rar), CompressionFormat::None, None) =>
+                VolumeCapabilities { can_read: true, can_create: false, native: true },
+            _ if capabilities.can_list => VolumeCapabilities { can_read: true, can_create: false, native: false },
+            _ => VolumeCapabilities::default(),
+        };
+        capabilities
     }
 
     /// Returns the display label for this resolved file format.
@@ -603,6 +622,7 @@ pub struct CreateOptions {
     pub encrypt_headers: bool,
     /// Whether TAR metadata is normalized for reproducible output.
     pub deterministic: bool,
+    pub volume_size: Option<u64>,
 }
 
 impl Default for CreateOptions {
@@ -617,11 +637,20 @@ impl Default for CreateOptions {
             dictionary_mib: 8,
             encrypt_headers: true,
             deterministic: false,
+            volume_size: None,
         }
     }
 }
 
 impl CreateOptions {
+    pub(crate) fn first_output_path(self, path: &Path) -> PathBuf {
+        if self.volume_size.is_some() {
+            crate::volumes::part_path(path, 1)
+        } else {
+            path.to_owned()
+        }
+    }
+
     /// Resolves the selected type and TAR method to a concrete output format.
     pub(crate) fn output_format(self) -> ResolvedFormat {
         self.format
@@ -1054,6 +1083,10 @@ fn create_archive_contents(
     allow_empty: bool,
 ) -> Result<()> {
     let format = options.output_format();
+    if let Some(size) = options.volume_size {
+        anyhow::ensure!(format.capabilities().volumes.can_create, "This format cannot create volumes");
+        anyhow::ensure!(size > 0, "Enter a valid volume size");
+    }
     if format == ResolvedFormat::Rar {
         anyhow::ensure!(
             rar_program().is_some(),
@@ -1292,6 +1325,9 @@ fn create_archive_contents(
     }
     output.as_file().sync_all()?;
     crate::task_queue::checkpoint()?;
+    if let Some(size) = options.volume_size {
+        return crate::volumes::publish(output.as_file_mut(), path, size);
+    }
     output
         .persist(path)
         .map_err(|error| error.error)

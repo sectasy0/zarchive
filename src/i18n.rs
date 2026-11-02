@@ -116,7 +116,15 @@ impl Language {
             |fragments: &[&str]| fragments.iter().any(|fragment| detail.contains(fragment));
         let key = if contains(&["archive volume is missing"]) {
             "Missing archive volume. Place all parts in the same folder."
-        } else if contains(&["archive volume number", "archive volume limit"]) {
+        } else if contains(&["archive volume checksum mismatch"]) {
+            "Archive volume checksum mismatch"
+        } else if contains(&["invalid archive volume manifest"]) {
+            "Invalid archive volume manifest"
+        } else if contains(&["archive volume size is invalid"]) {
+            "Archive volume size is invalid"
+        } else if contains(&["archive volume limit"]) {
+            "The archive would exceed 10,000 volumes. Increase the volume size."
+        } else if contains(&["archive volume number"]) {
             "The archive volume numbering is invalid."
         } else if contains(&[
             "permission denied",
@@ -2150,6 +2158,17 @@ const TRANSLATIONS: &[(&str, &str, &str, &str, &str, &str)] = &[
         "パスワードを生成",
         "Passwort generieren",
     ),
+    ("Advanced options", "Opcje zaawansowane", "高级选项", "Opciones avanzadas", "詳細オプション", "Erweiterte Optionen"),
+    ("Split into volumes", "Podziel na części", "分卷压缩", "Dividir en volúmenes", "分割して保存", "In Teile aufteilen"),
+    ("Volume size", "Rozmiar części", "分卷大小", "Tamaño del volumen", "分割サイズ", "Teilgröße"),
+    ("Custom size", "Własny rozmiar", "自定义大小", "Tamaño personalizado", "カスタムサイズ", "Benutzerdefinierte Größe"),
+    ("Size unit", "Jednostka rozmiaru", "大小单位", "Unidad de tamaño", "サイズ単位", "Größeneinheit"),
+    ("Enter a valid volume size", "Podaj prawidłowy rozmiar części", "请输入有效的分卷大小", "Introduce un tamaño de volumen válido", "有効な分割サイズを入力してください", "Gib eine gültige Teilgröße ein"),
+    ("This format cannot create volumes", "Ten format nie obsługuje tworzenia części", "此格式不支持创建分卷", "Este formato no permite crear volúmenes", "この形式では分割アーカイブを作成できません", "Dieses Format unterstützt keine mehrteiligen Archive"),
+    ("Archive volume checksum mismatch", "Suma kontrolna części archiwum jest nieprawidłowa", "压缩分卷校验和不匹配", "La suma de verificación del volumen no coincide", "分割アーカイブのチェックサムが一致しません", "Die Prüfsumme eines Archivteils stimmt nicht überein"),
+    ("Invalid archive volume manifest", "Spis części archiwum jest nieprawidłowy", "压缩分卷清单无效", "El manifiesto de volúmenes no es válido", "分割アーカイブのマニフェストが無効です", "Die Archivteilliste ist ungültig"),
+    ("Archive volume size is invalid", "Rozmiar części archiwum jest nieprawidłowy", "压缩分卷大小无效", "El tamaño del volumen no es válido", "分割アーカイブのサイズが無効です", "Die Größe eines Archivteils ist ungültig"),
+    ("The archive would exceed 10,000 volumes. Increase the volume size.", "Archiwum przekroczyłoby 10 000 części. Zwiększ rozmiar części.", "压缩分卷将超过 10,000 个。请增大分卷大小。", "El archivo superaría los 10 000 volúmenes. Aumenta el tamaño del volumen.", "分割数が 10,000 を超えます。分割サイズを大きくしてください。", "Das Archiv würde 10.000 Teile überschreiten. Erhöhe die Teilgröße."),
     (
         "Show password",
         "Pokaż hasło",
