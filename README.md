@@ -221,6 +221,38 @@ It combines a consistent workspace with system file dialogs and document opening
 through your default applications. Prebuilt package availability depends on the
 release.
 
+## Continuous Integration
+
+GitHub Actions runs the **CI** workflow on pushes, pull requests, and manual
+dispatches. It uses the Rust version pinned in `rust-toolchain.toml` and
+`Cargo.lock` (`--locked`) for reproducible dependency resolution.
+
+The test job runs `cargo test --locked` on macOS ARM64. The current GUI tests
+include macOS-specific keyboard shortcuts, so the complete suite is not yet
+run on Linux or Windows. Tests marked `#[ignore]` are manual sample generators
+or a performance benchmark and are not run automatically.
+
+After the tests pass, native release builds run for:
+
+| Platform | Architecture | Artifact |
+| :--- | :--- | :--- |
+| macOS | Apple Silicon (ARM64) | `zarchive-macos-arm64` |
+| macOS | Intel (x64) | `zarchive-macos-x64` |
+| Linux (Ubuntu 24.04) | x64 | `zarchive-linux-x64` |
+| Windows | x64 | `zarchive-windows-x64` |
+
+Download the archives from **Actions > CI > workflow run > Artifacts**. Artifacts
+are retained for 14 days. The Windows ZIP includes the native dependency DLLs;
+keep them beside `zarchive.exe` after extraction. Unix archives contain the
+executable and still require the corresponding system libraries. On macOS,
+install the compression libraries with `brew install libb2 xz zstd lz4`.
+Build-time native dependencies for each runner are defined in
+`.github/actions/setup-native/action.yml`.
+
+These are unsigned CI builds, not standalone installers or notarized macOS
+applications. This workflow does not publish GitHub Releases and needs no
+signing certificates or repository secrets.
+
 ## License
 
 zarchive is released under the **WTFPL** license.

@@ -1,0 +1,46 @@
+name: Set Up Native Dependencies
+description: Install the native libraries and compilers used by GPUI and libarchive.
+
+runs:
+  using: composite
+  steps:
+    - name: Install Linux Dependencies
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo -n apt-get update
+        sudo -n apt-get install --no-install-recommends -y \
+          build-essential clang libclang-dev cmake ninja-build pkg-config \
+          libssl-dev libbz2-dev liblzma-dev libzstd-dev liblz4-dev \
+          libxml2-dev libacl1-dev libb2-dev \
+          libfontconfig1-dev libfreetype6-dev libglib2.0-dev \
+          libgtk-3-dev libasound2-dev libudev-dev libvulkan-dev \
+          libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+          libxcb1-dev libxcb-xkb-dev libxcb-xinput-dev libxcb-randr0-dev \
+          libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+          libxcb-sync-dev libx11-xcb-dev libxcursor-dev libxrandr-dev \
+          libxi-dev libegl1-mesa-dev libgbm-dev
+
+    - name: Install macOS Dependencies
+      if: runner.os == 'macOS'
+      shell: bash
+      env:
+        HOMEBREW_NO_AUTO_UPDATE: '1'
+      run: |
+        brew install cmake pkg-config libb2 xz zstd lz4
+
+    - name: Set Up MSVC
+      if: runner.os == 'Windows'
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+
+    - name: Install Windows Dependencies
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install --triplet x64-windows zlib bzip2 liblzma zstd lz4 openssl
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        "LIBCLANG_PATH=C:/Program Files/LLVM/bin" >> $env:GITHUB_ENV
+        "BINDGEN_EXTRA_CLANG_ARGS=--target=x86_64-pc-windows-msvc" >> $env:GITHUB_ENV
+        "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" >> $env:GITHUB_PATH
