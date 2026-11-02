@@ -258,7 +258,6 @@ After the tests pass, native release builds run for:
 | Platform | Architecture | Artifact |
 | :--- | :--- | :--- |
 | macOS | Apple Silicon (ARM64) | `zarchive-macos-arm64` |
-| macOS | Intel (x64) | `zarchive-macos-x64` |
 | Linux (Ubuntu 24.04) | x64 | `zarchive-linux-x64` |
 | Windows | x64 | `zarchive-windows-x64` |
 
