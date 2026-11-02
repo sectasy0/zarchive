@@ -113,6 +113,7 @@ impl Inspector {
         self.source = None;
         self.revision = self.revision.wrapping_add(1);
     }
+
 }
 
 pub(crate) struct ComparisonDialog {

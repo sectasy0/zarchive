@@ -1219,6 +1219,11 @@ pub(crate) fn can_add_to_archive(path: &Path) -> bool {
     ResolvedFormat::from_path(path).is_some_and(|format| format.capabilities().can_modify)
 }
 
+pub(crate) fn can_replace_archive_entry(path: &Path) -> bool {
+    ResolvedFormat::from_path(path)
+        .is_some_and(|format| format.capabilities().can_modify && format != ResolvedFormat::Rar)
+}
+
 #[cfg(test)]
 pub(crate) fn add_to_archive(path: &Path, sources: &[PathBuf], folder: &str) -> Result<()> {
     add_to_archive_with_password(path, sources, folder, None)
@@ -1409,6 +1414,48 @@ pub(crate) fn remove_archive_entry(path: &Path, name: &str, password: Option<&st
     Ok(())
 }
 
+/// Replaces one regular-file entry by rebuilding the archive through private staging.
+pub(crate) fn replace_archive_entry_with_password(
+    path: &Path,
+    name: &str,
+    contents: &[u8],
+    password: Option<&str>,
+) -> Result<()> {
+    let format = ResolvedFormat::from_path(path).context("Unsupported archive format")?;
+    anyhow::ensure!(
+        format.capabilities().can_modify && format != ResolvedFormat::Rar,
+        "This archive format cannot replace entries"
+    );
+    let selected = safe_extraction_path(name)?;
+    let entries = list_archive_with_password(path, password)?;
+    anyhow::ensure!(
+        entries.iter().any(|entry| {
+            !entry.is_directory
+                && safe_extraction_path(&entry.name).is_ok_and(|entry_name| entry_name == selected)
+        }),
+        "A regular archive entry must be selected for editing"
+    );
+    let file_name = selected
+        .file_name()
+        .context("Archive entry has no filename")?;
+    let parent = selected
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let staging = tempfile::tempdir()?;
+    let replacement = staging.path().join(file_name);
+    std::fs::write(&replacement, contents)?;
+    rebuild_archive_with_changes(
+        path,
+        &[replacement],
+        &parent.to_string_lossy(),
+        password,
+        format,
+        Some(&selected),
+    )
+}
+
 fn rebuild_archive_with_additions(
     path: &Path,
     sources: &[PathBuf],
@@ -1450,7 +1497,13 @@ fn rebuild_archive_with_changes(
     }
     let mut names = BTreeSet::new();
     for entry in &existing {
-        let name = safe_extraction_path(&entry.name)?
+        let safe_name = safe_extraction_path(&entry.name)?;
+        if remove.is_some_and(|selected| {
+            safe_name == selected || safe_name.starts_with(selected)
+        }) {
+            continue;
+        }
+        let name = safe_name
             .to_string_lossy()
             .replace('\\', "/")
             .trim_end_matches('/')
@@ -3040,6 +3093,73 @@ mod tests {
             );
             assert_eq!(std::fs::read_to_string(path).unwrap(), "unchanged");
         }
+    }
+
+    #[test]
+    fn replacing_archive_entry_preserves_other_files_in_zip_and_tar() {
+        use std::io::Read;
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("edit.txt");
+        let keep = directory.path().join("keep.txt");
+        std::fs::write(&source, b"before").unwrap();
+        std::fs::write(&keep, b"untouched").unwrap();
+        for format in [ResolvedFormat::Zip, ResolvedFormat::Tar] {
+            let path = directory.path().join(format!("replace.{}", format.extension()));
+            create_archive(
+                &path,
+                &[source.clone(), keep.clone()],
+                CreateOptions {
+                    format,
+                    compression: format.compression_levels()[0],
+                    ..CreateOptions::default()
+                },
+            )
+            .unwrap();
+            super::replace_archive_entry_with_password(
+                &path,
+                "edit.txt",
+                b"after editing",
+                None,
+            )
+            .unwrap();
+            let mut edited = extract_entry(&path, "edit.txt").unwrap();
+            let mut edited_bytes = Vec::new();
+            edited.read_to_end(&mut edited_bytes).unwrap();
+            assert_eq!(edited_bytes, b"after editing", "{format:?}");
+            let mut kept = extract_entry(&path, "keep.txt").unwrap();
+            let mut kept_bytes = Vec::new();
+            kept.read_to_end(&mut kept_bytes).unwrap();
+            assert_eq!(kept_bytes, b"untouched", "{format:?}");
+        }
+    }
+
+    #[test]
+    fn replacing_aes_zip_entry_requires_and_preserves_its_password() {
+        use std::io::Read;
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("edit.txt");
+        std::fs::write(&source, b"before").unwrap();
+        let path = directory.path().join("replace.zip");
+        super::create_archive_with_password(
+            &path,
+            std::slice::from_ref(&source),
+            CreateOptions::default(),
+            Some("edit-password"),
+        )
+        .unwrap();
+        assert!(super::replace_archive_entry_with_password(&path, "edit.txt", b"after", None).is_err());
+        super::replace_archive_entry_with_password(
+            &path,
+            "edit.txt",
+            b"after",
+            Some("edit-password"),
+        )
+        .unwrap();
+        let mut edited = super::extract_entry_with_password(&path, "edit.txt", Some("edit-password"))
+            .unwrap();
+        let mut bytes = Vec::new();
+        edited.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"after");
     }
 
     #[test]

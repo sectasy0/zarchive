@@ -1,4 +1,5 @@
 use crate::{ArchiveManager, Theme, file_actions::EntryTarget, i18n::Language};
+use anyhow::Context as _;
 use gpui::component::{
     Disableable, Sizable,
     button::{Button, ButtonVariants},
@@ -316,7 +317,10 @@ pub(crate) struct Preview {
     hex: Option<HexPreview>,
     editor: Option<gpui::Entity<EditorState>>,
     csv: Option<CsvTable>,
+    hex_editor: Option<gpui::Entity<EditorState>>,
     error: Option<String>,
+    editing: bool,
+    saving: bool,
     cancel: Arc<AtomicBool>,
     task: Option<u64>,
     scroll: gpui::UniformListScrollHandle,
@@ -356,7 +360,10 @@ impl ArchiveManager {
             hex: None,
             editor: None,
             csv: None,
+            hex_editor: None,
             error: None,
+            editing: false,
+            saving: false,
             cancel: cancel.clone(),
             task: None,
             scroll: gpui::UniformListScrollHandle::new(),
@@ -416,6 +423,222 @@ impl ArchiveManager {
         self.inspector.text_preview = Some(preview);
         cx.notify();
     }
+
+    fn save_preview_contents(
+        &mut self,
+        target: EntryTarget,
+        contents: Vec<u8>,
+        preview: gpui::WeakEntity<Preview>,
+        cx: &mut Context<Self>,
+    ) {
+        let worker_target = target.clone();
+        let password = target
+            .password
+            .as_ref()
+            .map(|password| password.as_str().to_owned());
+        let resource = target.path.clone();
+        self.background_queue.enqueue(
+            "Saving file...",
+            crate::task_queue::TaskControl::default().for_paths([resource]),
+            move |control, _| async move {
+                if !control.checkpoint() {
+                    anyhow::bail!("save cancelled");
+                }
+                if let Some(entry) = &worker_target.archive_entry {
+                    crate::archive::replace_archive_entry_with_password(
+                        &worker_target.path,
+                        entry,
+                        &contents,
+                        password.as_deref(),
+                    )?;
+                } else {
+                    let format = crate::archive::ResolvedFormat::from_path(&worker_target.path);
+                    anyhow::ensure!(
+                        !format.is_some_and(|format| format.is_single_compressed()),
+                        "Editing standalone compressed streams is not supported"
+                    );
+                    let parent = worker_target
+                        .path
+                        .parent()
+                        .context("File has no parent directory")?;
+                    let metadata = std::fs::metadata(&worker_target.path)?;
+                    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+                    std::io::Write::write_all(&mut staged, &contents)?;
+                    staged.as_file().set_permissions(metadata.permissions())?;
+                    staged.as_file().sync_all()?;
+                    staged
+                        .persist(&worker_target.path)
+                        .map_err(|error| error.error)?;
+                }
+                if !control.checkpoint() {
+                    anyhow::bail!("save cancelled");
+                }
+                Ok(())
+            },
+            move |manager, result, window, cx| match result {
+                Ok(()) => {
+                    manager.status_message = Some(manager.language.text("File saved").to_owned());
+                    if target.archive_entry.is_some() {
+                        manager.inspect_sources(
+                            vec![(target.path.clone(), target.password.clone())],
+                            crate::inspection::InspectionMode::Preview,
+                            window,
+                            cx,
+                        );
+                    } else if let (Some(directory), Ok(metadata)) =
+                        (manager.current_directory.as_ref(), std::fs::metadata(&target.path))
+                    {
+                        for entry in &mut manager.entries {
+                            let entry_path = directory.join(
+                                entry.source_path.as_deref().unwrap_or(&entry.name),
+                            );
+                            if entry_path == target.path {
+                                entry.size = metadata.len();
+                            }
+                        }
+                    }
+                    manager.preview_text_target(&target, window, cx);
+                }
+                Err(crate::task_queue::TaskFailure::Cancelled) => {
+                    let _ = preview.update(cx, |preview, cx| {
+                        preview.saving = false;
+                        cx.notify();
+                    });
+                }
+                Err(crate::task_queue::TaskFailure::Failed(error)) => {
+                    let _ = preview.update(cx, |preview, cx| {
+                        preview.saving = false;
+                        preview.editing = true;
+                        preview.error = Some(format!("{}: {error:#}", preview.language.text("Could not save file")));
+                        cx.notify();
+                    });
+                }
+            },
+            cx,
+        );
+    }
+}
+
+impl Preview {
+    fn can_edit(&self) -> bool {
+        let complete = self
+            .content
+            .as_ref()
+            .is_some_and(|content| !content.truncated)
+            || self.hex.as_ref().is_some_and(|hex| !hex.truncated);
+        if !complete {
+            return false;
+        }
+        if self.target.archive_entry.is_some() {
+            crate::archive::can_replace_archive_entry(&self.target.path)
+        } else {
+            std::fs::metadata(&self.target.path)
+                .is_ok_and(|metadata| metadata.is_file() && !metadata.permissions().readonly())
+                && !crate::archive::ResolvedFormat::from_path(&self.target.path)
+                    .is_some_and(|format| format.is_single_compressed())
+        }
+    }
+
+    fn begin_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_edit() {
+            return;
+        }
+        if let Some(hex) = &self.hex {
+            let value = hex
+                .rows
+                .iter()
+                .map(|row| row.hex.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.hex_editor = Some(cx.new(|cx| {
+                EditorState::new(window, cx)
+                    .line_number(true)
+                    .soft_wrap(false)
+                    .scroll_bounce(false)
+                    .default_value(value)
+            }));
+        } else if self.editor.is_none() {
+            if let Some(content) = &self.content {
+                self.editor = Some(cx.new(|cx| {
+                    EditorState::new(window, cx)
+                        .language(syntax_language(&self.target))
+                        .line_number(true)
+                        .soft_wrap(false)
+                        .scroll_bounce(false)
+                        .default_value(content.text.clone())
+                }));
+            }
+        }
+        self.error = None;
+        self.editing = true;
+        cx.notify();
+    }
+
+    fn cancel_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(content) = &self.content {
+            let value = content.text.clone();
+            let language = syntax_language(&self.target);
+            self.editor = Some(cx.new(|cx| {
+                EditorState::new(window, cx)
+                    .language(language)
+                    .line_number(true)
+                    .soft_wrap(false)
+                    .scroll_bounce(false)
+                    .default_value(value)
+            }));
+        }
+        self.hex_editor = None;
+        self.error = None;
+        self.editing = false;
+        cx.notify();
+    }
+
+    fn save_editing(&mut self, cx: &mut Context<Self>) {
+        let contents = if self.hex.is_some() {
+            let Some(editor) = &self.hex_editor else {
+                return;
+            };
+            match parse_hex_bytes(editor.read(cx).value().as_str()) {
+                Ok(contents) => contents,
+                Err(_) => {
+                    self.error = Some(self.language.text("Invalid hex data").to_owned());
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            let Some(editor) = &self.editor else {
+                return;
+            };
+            let text = editor.read(cx).value().to_string();
+            if text.len() > MAX_BYTES {
+                self.error = Some(self.language.text("Edited preview exceeds the 128 KiB limit").to_owned());
+                cx.notify();
+                return;
+            }
+            text.into_bytes()
+        };
+        self.error = None;
+        self.saving = true;
+        let target = self.target.clone();
+        let preview = cx.entity().downgrade();
+        let _ = self.manager.update(cx, |manager, cx| {
+            manager.save_preview_contents(target, contents, preview, cx);
+        });
+        cx.notify();
+    }
+}
+
+fn parse_hex_bytes(text: &str) -> anyhow::Result<Vec<u8>> {
+    let tokens: Vec<_> = text.split_whitespace().collect();
+    anyhow::ensure!(tokens.len() <= MAX_BYTES, "Hex data exceeds the 128 KiB limit");
+    tokens
+        .into_iter()
+        .map(|token| {
+            anyhow::ensure!(token.len() == 2, "Each byte must use exactly two hex digits");
+            Ok(u8::from_str_radix(token, 16)?)
+        })
+        .collect()
 }
 
 impl Render for Preview {
@@ -439,7 +662,9 @@ impl Render for Preview {
             .unwrap_or_else(|| self.target.name.clone());
         let message = if self.task.is_some() {
             Some(language.text("Loading text preview..."))
-        } else if let Some(error) = &self.error {
+        } else if self.saving {
+            Some(language.text("Saving file..."))
+        } else if !self.editing && let Some(error) = &self.error {
             Some(language.error_message(error))
         } else if self
             .content
@@ -451,7 +676,9 @@ impl Render for Preview {
             None
         };
         let preview_label = if self.hex.is_some() {
-            "Binary preview"
+            if self.editing { "Hex editor" } else { "Binary preview" }
+        } else if self.editing {
+            "Text editor"
         } else if self.csv.is_some() {
             "CSV preview"
         } else {
@@ -509,17 +736,70 @@ impl Render for Preview {
                             .ghost()
                             .xsmall()
                             .icon(gpui::assets::IconName::Copy)
-                            .tooltip(language.text("Copy text"))
-                            .accessibility_label(language.text("Copy text"))
-                            .disabled(self.content.is_none())
+                            .tooltip(language.text(if self.hex.is_some() { "Copy hex" } else { "Copy text" }))
+                            .accessibility_label(language.text(if self.hex.is_some() { "Copy hex" } else { "Copy text" }))
+                            .disabled(self.content.is_none() && self.hex.is_none())
                             .on_click(cx.listener(|preview, _, _, cx| {
-                                if let Some(content) = &preview.content {
+                                if preview.editing {
+                                    if let Some(editor) = &preview.hex_editor {
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                            editor.read(cx).value().to_string(),
+                                        ));
+                                    } else if let Some(editor) = &preview.editor {
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                            editor.read(cx).value().to_string(),
+                                        ));
+                                    }
+                                } else if let Some(content) = &preview.content {
                                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                                         content.text.clone(),
                                     ));
+                                } else if let Some(hex) = &preview.hex {
+                                    let text = hex.rows.iter().map(|row| row.hex.as_str()).collect::<Vec<_>>().join("\n");
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                                 }
                             })),
                     )
+                    .when(!self.editing && self.can_edit(), |header| {
+                        header.child(
+                            Button::new("edit-preview")
+                                .ghost()
+                                .xsmall()
+                                .icon(gpui::assets::IconName::Pencil)
+                                .tooltip(language.text("Edit file"))
+                                .accessibility_label(language.text("Edit file"))
+                                .on_click(cx.listener(|preview, _, window, cx| {
+                                    preview.begin_editing(window, cx);
+                                })),
+                        )
+                    })
+                    .when(self.editing, |header| {
+                        header
+                            .child(
+                                Button::new("save-preview-edits")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(gpui::assets::IconName::Save)
+                                    .tooltip(language.text("Save changes"))
+                                    .accessibility_label(language.text("Save changes"))
+                                    .disabled(self.saving)
+                                    .on_click(cx.listener(|preview, _, _, cx| {
+                                        preview.save_editing(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("cancel-preview-edits")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(gpui::assets::IconName::X)
+                                    .tooltip(language.text("Cancel editing"))
+                                    .accessibility_label(language.text("Cancel editing"))
+                                    .disabled(self.saving)
+                                    .on_click(cx.listener(|preview, _, window, cx| {
+                                        preview.cancel_editing(window, cx);
+                                    })),
+                            )
+                    })
                     .child(
                         Button::new("close-text-preview")
                             .ghost()
@@ -556,6 +836,16 @@ impl Render for Preview {
                     )
                 },
             )
+            .when(self.editing && self.error.is_some(), |panel| {
+                panel.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_xs()
+                        .text_color(rgb(if theme.window < 0x808080 { 0xfca5a5 } else { 0xb91c1c }))
+                        .child(language.error_message(self.error.as_deref().unwrap_or_default())),
+                )
+            })
             .when_some(message, |panel, message| {
                 panel.child(
                     div()
@@ -568,7 +858,63 @@ impl Render for Preview {
                         .child(message),
                 )
             })
-            .when(message.is_none() && self.hex.is_some(), |panel| {
+                .when(message.is_none() && self.editing && self.hex.is_none(), |panel| {
+                    panel.child(
+                        div()
+                            .id("text-preview-editor")
+                            .debug_selector(|| "text-preview-editor".to_owned())
+                            .flex()
+                            .flex_1()
+                            .min_h(px(0.0))
+                            .overflow_hidden()
+                            .bg(rgb(theme.surface))
+                            .when_some(self.editor.as_ref(), |panel, editor| {
+                                panel.child(
+                                    Editor::new(editor)
+                                        .readonly(false)
+                                        .appearance(false)
+                                        .bordered(false)
+                                        .aria_label(language.text("Text editor"))
+                                        .w_full()
+                                        .h_full()
+                                        .min_h(px(0.0))
+                                        .rounded_none()
+                                        .bg(rgb(theme.surface))
+                                        .text_color(rgb(theme.text))
+                                        .text_size(px(12.0)),
+                                )
+                            }),
+                    )
+                })
+                .when(message.is_none() && self.editing && self.hex.is_some(), |panel| {
+                    panel.child(
+                        div()
+                            .id("binary-preview-editor")
+                            .debug_selector(|| "binary-preview-editor".to_owned())
+                            .flex()
+                            .flex_1()
+                            .min_h(px(0.0))
+                            .overflow_hidden()
+                            .bg(rgb(theme.surface))
+                            .when_some(self.hex_editor.as_ref(), |panel, editor| {
+                                panel.child(
+                                    Editor::new(editor)
+                                        .readonly(false)
+                                        .appearance(false)
+                                        .bordered(false)
+                                        .aria_label(language.text("Hex editor"))
+                                        .w_full()
+                                        .h_full()
+                                        .min_h(px(0.0))
+                                        .rounded_none()
+                                        .bg(rgb(theme.surface))
+                                        .text_color(rgb(theme.text))
+                                        .text_size(px(12.0)),
+                                )
+                            }),
+                    )
+                })
+                .when(message.is_none() && !self.editing && self.hex.is_some(), |panel| {
                 let hex = self.hex.as_ref().unwrap();
                 panel.child(
                     div()
@@ -636,7 +982,7 @@ impl Render for Preview {
                         ),
                 )
             })
-            .when(message.is_none() && self.csv.is_some(), |panel| {
+            .when(message.is_none() && !self.editing && self.csv.is_some(), |panel| {
                 let table = self.csv.as_ref().unwrap();
                 let width = 48.0 + table.headers.len() as f32 * 180.0;
                 panel.child(
@@ -682,7 +1028,7 @@ impl Render for Preview {
                                 .track_scroll(&self.scroll).flex_1().min_h(px(0.0)).w_full()))
                 )
             })
-            .when(message.is_none() && self.csv.is_none() && self.hex.is_none(), |panel| {
+            .when(message.is_none() && !self.editing && self.csv.is_none() && self.hex.is_none(), |panel| {
                 panel.child(
                     div()
                         .id("text-preview-editor")
@@ -1286,6 +1632,132 @@ mod tests {
     }
 
     #[gpui::test]
+    fn preview_editor_saves_local_text_and_binary_files(cx: &mut gpui::TestAppContext) {
+        use gpui::test::TestWindowExt;
+        let directory = tempfile::tempdir().unwrap();
+        let text_path = directory.path().join("notes.txt");
+        let binary_path = directory.path().join("payload.bin");
+        std::fs::write(&text_path, b"before").unwrap();
+        std::fs::write(&binary_path, [0x00, 0x11, 0x22]).unwrap();
+        let (view, cx) = crate::tests::component_window(cx, |_, cx| crate::tests::test_manager(cx));
+
+        let mut target = EntryTarget {
+            name: "notes.txt".into(),
+            key: "notes.txt".into(),
+            path: text_path.clone(),
+            archive_entry: None,
+            password: None,
+            is_directory: false,
+        };
+        cx.update(|window, cx| {
+            view.update(cx, |manager, cx| manager.preview_text_target(&target, window, cx));
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.click("edit-preview", cx));
+        let text_editor = cx.read(|cx| {
+            view.read(cx)
+                .inspector
+                .text_preview
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .editor
+                .clone()
+                .unwrap()
+        });
+        cx.update(|window, cx| {
+            text_editor.update(cx, |editor, cx| editor.set_value("after", window, cx));
+            window.click("save-preview-edits", cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(std::fs::read(&text_path).unwrap(), b"after");
+
+        target.name = "payload.bin".into();
+        target.key = "payload.bin".into();
+        target.path = binary_path.clone();
+        cx.update(|window, cx| {
+            view.update(cx, |manager, cx| manager.preview_text_target(&target, window, cx));
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.click("edit-preview", cx));
+        let hex_editor = cx.read(|cx| {
+            view.read(cx)
+                .inspector
+                .text_preview
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .hex_editor
+                .clone()
+                .unwrap()
+        });
+        cx.update(|window, cx| {
+            hex_editor.update(cx, |editor, cx| editor.set_value("AA BB CC DD", window, cx));
+            window.click("save-preview-edits", cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(std::fs::read(&binary_path).unwrap(), [0xaa, 0xbb, 0xcc, 0xdd]);
+    }
+
+    #[gpui::test]
+    fn preview_editor_replaces_an_archive_entry_without_visible_extraction(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::test::TestWindowExt;
+        use std::io::Read;
+        let directory = tempfile::tempdir().unwrap();
+        let sources = tempfile::tempdir().unwrap();
+        let source = sources.path().join("notes.txt");
+        let archive = directory.path().join("notes.zip");
+        std::fs::write(&source, b"inside before").unwrap();
+        crate::archive::create_archive(
+            &archive,
+            std::slice::from_ref(&source),
+            crate::archive::CreateOptions::default(),
+        )
+        .unwrap();
+        let target = EntryTarget {
+            name: "notes.txt".into(),
+            key: "notes.txt".into(),
+            path: archive.clone(),
+            archive_entry: Some("notes.txt".into()),
+            password: None,
+            is_directory: false,
+        };
+        let (view, cx) = crate::tests::component_window(cx, |_, cx| {
+            let mut manager = crate::tests::test_manager(cx);
+            manager.current_directory = None;
+            manager
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |manager, cx| manager.preview_text_target(&target, window, cx));
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.click("edit-preview", cx));
+        let editor = cx.read(|cx| {
+            view.read(cx)
+                .inspector
+                .text_preview
+                .as_ref()
+                .unwrap()
+                .read(cx)
+                .editor
+                .clone()
+                .unwrap()
+        });
+        cx.update(|window, cx| {
+            editor.update(cx, |editor, cx| editor.set_value("inside after", window, cx));
+            window.click("save-preview-edits", cx);
+        });
+        cx.run_until_parked();
+        let mut saved = crate::archive::extract_entry(&archive, "notes.txt").unwrap();
+        let mut saved_bytes = Vec::new();
+        saved.read_to_end(&mut saved_bytes).unwrap();
+        assert_eq!(saved_bytes, b"inside after");
+        assert!(!directory.path().join("notes.txt").exists());
+    }
+
+    #[gpui::test]
     fn text_preview_cancels_stale_reads_when_selection_changes(cx: &mut gpui::TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
         let first = directory.path().join("first.txt");
@@ -1447,6 +1919,14 @@ mod tests {
         assert!(preview.truncated);
         assert_eq!(preview.rows.len(), MAX_BYTES / 16);
         assert_eq!(preview.rows.last().unwrap().offset, MAX_BYTES - 16);
+    }
+
+    #[test]
+    fn hex_editor_parser_accepts_byte_pairs_and_rejects_invalid_values() {
+        assert_eq!(parse_hex_bytes("00 01 ff\n10").unwrap(), [0x00, 0x01, 0xff, 0x10]);
+        assert!(parse_hex_bytes("0f f").is_err());
+        assert!(parse_hex_bytes("gg").is_err());
+        assert!(parse_hex_bytes(&"00 ".repeat(MAX_BYTES + 1)).is_err());
     }
 
     #[test]
