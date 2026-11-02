@@ -523,8 +523,10 @@ pub(crate) fn view(
                                 .label(language.text("Generate password"))
                                 .ghost()
                                 .small()
-                                .on_click(cx.listener(|this, _, _, cx| {
+                                .on_click(cx.listener(|this, _, window, cx| {
                                     this.creation.generate_password();
+                                    crate::secret::prepare(this, window, cx);
+                                    window.focus(&this.creation.password.focus, cx);
                                     cx.notify();
                                 })),
                         ),
@@ -685,7 +687,12 @@ mod tests {
             assert_eq!(form.options.compression, CompressionLevel::Stored);
             form.apply(ChoiceField::Format, 0);
             assert_eq!(form.options.compression, CompressionLevel::Stored);
-            form.apply(ChoiceField::Format, 2);
+            let seven_zip_index = ResolvedFormat::CREATION_FORMATS
+                .iter()
+                .position(|format| *format == ResolvedFormat::SevenZip)
+                .unwrap();
+            form.apply(ChoiceField::Format, seven_zip_index);
+            assert_eq!(form.options.format, ResolvedFormat::SevenZip);
             assert_eq!(form.options.compression, CompressionLevel::Normal);
             form.apply(ChoiceField::Compression, 2);
             assert_eq!(form.options.compression, CompressionLevel::Best);

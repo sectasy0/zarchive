@@ -3007,8 +3007,10 @@ mod tests {
             assert_eq!(Language::Spanish.text(english), spanish);
             assert_eq!(Language::Japanese.text(english), japanese);
             assert_eq!(Language::German.text(english), german);
-            assert_ne!(chinese, english, "missing Chinese translation: {english}");
-            assert_ne!(japanese, english, "missing Japanese translation: {english}");
+            if english != "ASCII" {
+                assert_ne!(chinese, english, "missing Chinese translation: {english}");
+                assert_ne!(japanese, english, "missing Japanese translation: {english}");
+            }
         }
     }
 

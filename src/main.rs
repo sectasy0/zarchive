@@ -1845,6 +1845,7 @@ fn icon_aspect_ratio(name: &str) -> f32 {
         "arrow-down" | "arrow-up" | "document"  | "image" | "audio"
         | "video" | "code" | "file" | "archive" | "archive-locked" => 0.75,
         "arrow-left" | "documents" => 0.875,
+        "csv" => 547.8 / 548.0,
         "chevron-left" => 0.625,
         "home" => 1.125,
         "folder-open" => 1.125,
@@ -2306,6 +2307,7 @@ mod tests {
         });
         cx.update(|window, cx| window.click("toolbar-search-input", cx));
         cx.simulate_keystrokes("needle");
+        cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         cx.update(|window, cx| window.render_frame(cx));
         assert!(cx.debug_bounds("search-results-skeleton").is_some());
@@ -2400,6 +2402,7 @@ mod tests {
         assert!(cx.debug_bounds("file:./docs/deep/Needle.TXT").is_none());
         cx.update(|window, cx| window.click("toolbar-search-input", cx));
         cx.simulate_keystrokes("NEEDLE");
+        cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         let result = cx.debug_bounds("file:./docs/deep/Needle.TXT").unwrap();
         assert!(cx.debug_bounds("file:other/needle.txt").is_some());
@@ -2856,15 +2859,18 @@ mod tests {
     #[test]
     /// Preserves the expected aspect ratios for bundled icons with non-square view boxes.
     fn preserves_font_awesome_icon_aspect_ratios() {
-        assert_eq!(icon_aspect_ratio("document"), 0.75);
-        assert_eq!(icon_aspect_ratio("documents"), 0.875);
-        assert_eq!(icon_aspect_ratio("code"), 0.75);
-        assert_eq!(icon_aspect_ratio("folder"), 1.0);
-        assert_eq!(icon_aspect_ratio("binary"), 1.0);
-        assert_eq!(icon_aspect_ratio("csv"), 0.75);
-        assert_eq!(icon_aspect_ratio("archive-locked"), 0.75);
-        assert_eq!(icon_aspect_ratio("chevron-left"), 0.625);
-        assert_eq!(icon_aspect_ratio("chevron-up"), 1.0);
-        assert_eq!(icon_aspect_ratio("chevron-down"), 1.0);
+        use gpui::AssetSource;
+        let assets = crate::icons::IconAssets;
+        for name in [
+            "document", "documents", "code", "folder", "binary", "csv",
+            "archive-locked", "chevron-left", "chevron-up", "chevron-down",
+        ] {
+            let bytes = assets.load(&format!("icons/{name}.svg")).unwrap().unwrap();
+            let document = roxmltree::Document::parse(std::str::from_utf8(&bytes).unwrap()).unwrap();
+            let dimensions = document.root_element().attribute("viewBox").unwrap()
+                .split_whitespace().map(|value| value.parse::<f32>().unwrap()).collect::<Vec<_>>();
+            let expected = dimensions[2] / dimensions[3];
+            assert!((icon_aspect_ratio(name) - expected).abs() < 0.00001, "incorrect icon proportions: {name}");
+        }
     }
 }
