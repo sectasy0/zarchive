@@ -29,7 +29,7 @@ fn search_directory_archives(
     for entry in entries.iter().filter(|entry| !entry.is_directory) {
         if cancel.load(Ordering::Relaxed) { break; }
         let path = directory.join(entry.source_path.as_deref().unwrap_or(&entry.name));
-        if !crate::archive::is_supported_archive(&path) { continue; }
+        if !crate::archive::is_supported_archive(&path) || !crate::archive::is_primary_volume(&path) { continue; }
         let report = crate::inspection::inspect(&path, None, crate::inspection::InspectionMode::Preview, cancel);
         if report.error.is_some() { continue; }
         for info in report.entries {
@@ -271,6 +271,25 @@ mod archive_search_tests {
     }
 
     #[test]
+    fn directory_search_scans_multipart_archives_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_root = tempfile::tempdir().unwrap();
+        let source = source_root.path().join("needle.txt");
+        std::fs::write(&source, b"multipart search result").unwrap();
+        let path = source_root.path().join("archive.zip");
+        crate::archive::create_zip(&path, &[source]).unwrap();
+        let bytes = std::fs::read(path).unwrap();
+        for (index, bytes) in bytes.chunks(31).enumerate() {
+            std::fs::write(directory.path().join(format!("archive.zip.{:03}", index + 1)), bytes).unwrap();
+        }
+        let entries = crate::browser::read_directory(directory.path()).unwrap();
+        let results = search_directory_archives(directory.path(), &entries, "needle", &AtomicBool::new(false));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].target.path, directory.path().join("archive.zip.001"));
+        assert_eq!(results[0].target.archive_entry.as_deref(), Some("needle.txt"));
+    }
+
+    #[test]
     fn directory_search_supports_all_formats_and_identifies_protected_entries() {
         let directory = tempfile::tempdir().unwrap();
         let source_root = tempfile::tempdir().unwrap();
@@ -396,6 +415,7 @@ fn refresh_archive_search(manager: &mut ArchiveManager, _window: &Window, cx: &m
     let sources = directory.as_ref().filter(|_| eligible).map(|directory| {
         manager.entries.iter().filter(|entry| !entry.is_directory)
             .filter(|entry| crate::archive::is_supported_archive(&directory.join(entry.source_path.as_deref().unwrap_or(&entry.name))))
+            .filter(|entry| crate::archive::is_primary_volume(&directory.join(entry.source_path.as_deref().unwrap_or(&entry.name))))
             .map(|entry| (entry.source_path.clone().unwrap_or_else(|| entry.name.clone()), entry.size)).collect::<Vec<_>>()
     }).unwrap_or_default();
     if manager.toolbar_search.directory == directory && manager.toolbar_search.searched_query == query && manager.toolbar_search.sources == sources { return; }
@@ -422,7 +442,9 @@ fn refresh_archive_search(manager: &mut ArchiveManager, _window: &Window, cx: &m
         crate::task_queue::TaskControl::with_cancel(cancel.clone()).for_paths(entries.iter().filter(|entry| !entry.is_directory).map(|entry| directory.join(entry.source_path.as_deref().unwrap_or(&entry.name)))),
         move |control, reporter| async move {
             executor.timer(std::time::Duration::from_millis(150)).await;
-            let entries: Vec<_> = entries.into_iter().filter(|entry| !entry.is_directory && crate::archive::is_supported_archive(&scan_directory.join(entry.source_path.as_deref().unwrap_or(&entry.name)))).collect();
+            let entries: Vec<_> = entries.into_iter().filter(|entry| !entry.is_directory
+                && crate::archive::is_supported_archive(&scan_directory.join(entry.source_path.as_deref().unwrap_or(&entry.name)))
+                && crate::archive::is_primary_volume(&scan_directory.join(entry.source_path.as_deref().unwrap_or(&entry.name)))).collect();
             let total = entries.len() as u64;
             reporter.set(0, total);
             let mut results = Vec::new();

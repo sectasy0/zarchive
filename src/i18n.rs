@@ -114,7 +114,11 @@ impl Language {
         let detail = reason.to_ascii_lowercase();
         let contains =
             |fragments: &[&str]| fragments.iter().any(|fragment| detail.contains(fragment));
-        let key = if contains(&[
+        let key = if contains(&["archive volume is missing"]) {
+            "Missing archive volume. Place all parts in the same folder."
+        } else if contains(&["archive volume number", "archive volume limit"]) {
+            "The archive volume numbering is invalid."
+        } else if contains(&[
             "permission denied",
             "operation not permitted",
             "access denied",
@@ -154,6 +158,7 @@ impl Language {
             "checksum",
             "crc",
             "unexpected eof",
+            "archive volume was truncated",
             "failed to fill whole buffer",
             "end of file",
             "eocd",
@@ -2170,6 +2175,30 @@ const TRANSLATIONS: &[(&str, &str, &str, &str, &str, &str)] = &[
         "Ein Passwort konnte nicht sicher generiert werden",
     ),
     (
+        "Missing archive volume. Place all parts in the same folder.",
+        "Brakuje części archiwum. Umieść wszystkie części w tym samym folderze.",
+        "缺少压缩分卷。请将所有分卷放在同一文件夹中。",
+        "Falta un volumen del archivo. Coloca todas las partes en la misma carpeta.",
+        "分割アーカイブが不足しています。すべての分割ファイルを同じフォルダーに置いてください。",
+        "Ein Archivteil fehlt. Lege alle Teile im selben Ordner ab.",
+    ),
+    (
+        "The archive volume numbering is invalid.",
+        "Numeracja części archiwum jest nieprawidłowa.",
+        "压缩分卷编号无效。",
+        "La numeración de los volúmenes del archivo no es válida.",
+        "分割アーカイブの番号が無効です。",
+        "Die Nummerierung der Archivteile ist ungültig.",
+    ),
+    (
+        "Multipart archives are read-only",
+        "Archiwa wieloczęściowe są tylko do odczytu",
+        "多卷压缩文件为只读",
+        "Los archivos de varios volúmenes son de solo lectura",
+        "分割アーカイブは読み取り専用です",
+        "Mehrteilige Archive sind schreibgeschützt",
+    ),
+    (
         "Archive password",
         "Hasło archiwum",
         "压缩文件密码",
@@ -3010,6 +3039,21 @@ mod tests {
             if english != "ASCII" {
                 assert_ne!(chinese, english, "missing Chinese translation: {english}");
                 assert_ne!(japanese, english, "missing Japanese translation: {english}");
+            }
+        }
+    }
+
+    #[test]
+    fn multipart_errors_are_localized_with_context() {
+        for language in Language::ALL {
+            for (error, key) in [
+                ("Failed to open backup.zip.001: Archive volume is missing",
+                    "Missing archive volume. Place all parts in the same folder."),
+                ("Failed to open backup.zip.001: Duplicate archive volume number",
+                    "The archive volume numbering is invalid."),
+                ("Multipart archives are read-only", "Multipart archives are read-only"),
+            ] {
+                assert_eq!(language.error_message(error), language.text(key));
             }
         }
     }

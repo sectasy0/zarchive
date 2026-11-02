@@ -145,6 +145,27 @@ individual files without a folder hierarchy. CPIO, AR, and PAX are created
 without compression; XAR uses its built-in default compression. These formats
 do not offer password encryption.
 
+### Multipart Archives
+
+Open any numbered part such as `backup.7z.001`, `backup.zip.002`, or
+`backup.tar.gz.001`. All parts must be in the same folder and numbered
+consecutively from `001`. The application reads them as one seekable stream
+without assembling the entire archive in memory or writing a combined file.
+Listing, file previews, extraction, integrity checks, and audits use all parts;
+ZIP and 7z passwords work as with single-file archives. Numbered CPIO, AR, PAX,
+XAR, and standalone compressed streams are also supported.
+
+RAR volumes use the native UnRAR reader, including `backup.part01.rar` and the
+older `backup.rar`/`backup.r00` naming scheme. Opening a later recognized volume
+starts from the first part. Directory searches inspect only the first volume
+to avoid duplicate results.
+
+Multipart archives are read-only: adding, replacing, and removing entries are
+disabled. Creation still produces a single archive file. Native split ZIP sets
+using `.z01`, `.z02`, and a final `.zip` are not supported; they differ from
+byte-split `.zip.001` archives. Missing numbered volumes are reported rather
+than silently skipped. A set is limited to 10,000 parts.
+
 ### Updating Existing Archives
 
 Existing ZIP, TAR (including all supported compressed TAR variants), 7z, CPIO,

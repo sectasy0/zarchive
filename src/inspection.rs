@@ -261,6 +261,11 @@ impl Report {
 
 /// Infers the expected format from the archive filename extension.
 fn expected_format(path: &Path) -> Option<ResolvedFormat> {
+    if crate::volumes::numbered_base(path).is_some()
+        || archive::ResolvedFormat::from_path(path) == Some(ResolvedFormat::Rar)
+    {
+        return archive::ResolvedFormat::from_path(path);
+    }
     let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
     if name.ends_with(".tar.bz2") || name.ends_with(".tbz") || name.ends_with(".tbz2") {
         Some(ResolvedFormat::TarBz2)
@@ -445,9 +450,9 @@ fn inspect_inner(
     mode: InspectionMode,
     cancel: &AtomicBool,
 ) -> Result<()> {
-    let file = File::open(&report.path)?;
-    let metadata = file.metadata()?;
-    report.archive_size = metadata.len();
+    let metadata = std::fs::metadata(&report.path)?;
+    let file = archive::open_archive_reader(&report.path)?;
+    report.archive_size = file.len();
     report.created = metadata.created().ok().map(format_system_time);
     report.modified = metadata.modified().ok().map(format_system_time);
     report.accessed = metadata.accessed().ok().map(format_system_time);
@@ -463,8 +468,9 @@ fn inspect_inner(
         inner: file,
         cancel,
     };
-    let mut header = [0_u8; 512];
-    let count = file.read(&mut header)?;
+    let mut header = Vec::with_capacity(512);
+    file.by_ref().take(512).read_to_end(&mut header)?;
+    let count = header.len();
     report.detected = resolve_detected_format(detect_format(&header[..count]), report.expected);
     if report.detected.is_none()
         && matches!(report.expected, Some(ResolvedFormat::Tar | ResolvedFormat::Pax))
@@ -526,7 +532,7 @@ fn inspect_inner(
     let mut budget = mode.max_total_bytes();
     match format {
         ResolvedFormat::Cpio | ResolvedFormat::Ar | ResolvedFormat::Pax => {
-            let mut reader = libarchive2::ReadArchive::open(&report.path)?;
+            let mut reader = archive::open_extended_archive(&report.path)?;
             loop {
                 anyhow::ensure!(!cancel.load(Ordering::Relaxed), "Inspection cancelled");
                 if report.entries.len() >= mode.max_entries() { report.limited = true; break; }

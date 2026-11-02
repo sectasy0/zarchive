@@ -13,6 +13,7 @@ use sevenz_rust::{Password, SevenZReader};
 use tar::Archive as TarArchive;
 use tempfile::{Builder, NamedTempFile};
 use zip::ZipArchive;
+use crate::volumes::ArchiveReader;
 
 #[derive(Clone)]
 /// One archive entry or filesystem item in the shared browser representation.
@@ -476,7 +477,19 @@ impl ResolvedFormat {
 
     /// Resolves a supported extension to its archive, compression, or disk-image layers.
     pub(crate) fn from_path(path: &Path) -> Option<Self> {
+        if let Some(base) = crate::volumes::numbered_base(path) {
+            return Self::from_path(&base).filter(|format| {
+                *format != Self::Rar && format.capabilities().can_list
+            });
+        }
         let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
+        if path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
+            let extension = extension.to_ascii_lowercase();
+            extension.len() == 3 && extension.starts_with('r')
+                && extension.as_bytes()[1..].iter().all(u8::is_ascii_digit)
+        }) {
+            return Some(Self::Rar);
+        }
         if name.ends_with(".tar.bz2") || name.ends_with(".tbz") || name.ends_with(".tbz2") {
             Some(Self::TarBz2)
         } else if name.ends_with(".tar.xz") || name.ends_with(".txz") {
@@ -659,7 +672,7 @@ pub fn is_supported_archive(path: &Path) -> bool {
 /// Checks ZIP and 7z metadata for password protection without extracting entries.
 pub(crate) fn is_password_protected(path: &Path) -> bool {
     match ResolvedFormat::from_path(path) {
-        Some(ResolvedFormat::Zip) => File::open(path)
+        Some(ResolvedFormat::Zip) => open_archive_reader(path)
             .ok()
             .and_then(|file| ZipArchive::new(file).ok())
             .is_some_and(|mut archive| {
@@ -670,7 +683,7 @@ pub(crate) fn is_password_protected(path: &Path) -> bool {
                 })
             }),
         Some(ResolvedFormat::SevenZip) => {
-            match SevenZReader::open(path, Password::empty()) {
+            match open_seven_zip(path, None) {
                 Ok(archive) => archive
                     .archive()
                     .folders
@@ -678,13 +691,57 @@ pub(crate) fn is_password_protected(path: &Path) -> bool {
                     .flat_map(|folder| &folder.coders)
                     .any(|coder| coder.decompression_method_id() == [0x06, 0xf1, 0x07, 0x01]),
                 Err(error) => matches!(
-                    seven_zip_error(error, None).downcast_ref::<PasswordFailure>(),
+                    error.downcast_ref::<PasswordFailure>(),
                     Some(PasswordFailure::Required)
                 ),
             }
         }
         _ => false,
     }
+}
+
+pub(crate) fn open_archive_reader(path: &Path) -> Result<ArchiveReader> {
+    anyhow::ensure!(
+        !is_spanned_zip(path),
+        "Native split ZIP archives (.z01) are not supported"
+    );
+    let path = if ResolvedFormat::from_path(path) == Some(ResolvedFormat::Rar) {
+        unrar::Archive::new(path).first_part()
+    } else {
+        path.to_owned()
+    };
+    ArchiveReader::open(&path).with_context(|| format!("Failed to open {}", path.display()))
+}
+
+fn open_seven_zip(path: &Path, password: Option<&str>) -> Result<SevenZReader<ArchiveReader>> {
+    let reader = open_archive_reader(path)?;
+    let length = reader.len();
+    SevenZReader::new(reader, length, password.map(Password::from).unwrap_or_default())
+        .map_err(|error| seven_zip_error(error, password))
+}
+
+pub(crate) fn is_multipart_archive(path: &Path) -> bool {
+    crate::volumes::numbered_base(path).is_some()
+    || is_spanned_zip(path)
+        || (ResolvedFormat::from_path(path) == Some(ResolvedFormat::Rar)
+            && (unrar::Archive::new(path).first_part_option().is_some()
+                || path.with_extension("r00").is_file()))
+}
+
+fn is_spanned_zip(path: &Path) -> bool {
+    ResolvedFormat::from_path(path) == Some(ResolvedFormat::Zip)
+        && path.with_extension("z01").is_file()
+}
+
+pub(crate) fn is_primary_volume(path: &Path) -> bool {
+    if crate::volumes::numbered_base(path).is_some() {
+        return path.extension().and_then(|extension| extension.to_str())
+            .and_then(|extension| extension.parse::<usize>().ok()) == Some(1);
+    }
+    if ResolvedFormat::from_path(path) == Some(ResolvedFormat::Rar) {
+        return unrar::Archive::new(path).first_part() == path;
+    }
+    true
 }
 
 /// Reports whether the resolved file format supports content extraction.
@@ -728,11 +785,21 @@ pub fn list_archive_with_password(
 
 /// Opens a compressed TAR stream through the decoder selected by its filename format.
 fn open_tar_reader(path: &Path, format: ResolvedFormat) -> Result<Box<dyn Read>> {
-    let file = File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+    let file = open_archive_reader(path)?;
     decode_archive_stream(file, format)
 }
 
 pub(crate) struct ExtendedEntryReader<'a, 'b>(pub(crate) &'a mut libarchive2::ReadArchive<'b>);
+
+pub(crate) fn open_extended_archive(path: &Path) -> Result<libarchive2::ReadArchive<'static>> {
+    if crate::volumes::numbered_base(path).is_some() {
+        Ok(libarchive2::ReadArchive::open_callback(libarchive2::CallbackReader::new(
+            crate::task_queue::TaskReader(open_archive_reader(path)?),
+        ))?)
+    } else {
+        Ok(libarchive2::ReadArchive::open(path)?)
+    }
+}
 
 impl Read for ExtendedEntryReader<'_, '_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
@@ -742,7 +809,7 @@ impl Read for ExtendedEntryReader<'_, '_> {
 
 fn list_extended_archive(path: &Path) -> Result<Vec<ArchiveEntry>> {
     if ResolvedFormat::from_path(path) == Some(ResolvedFormat::Xar) {
-        let reader = crate::xar::XarReader::new(File::open(path)?)?;
+        let reader = crate::xar::XarReader::new(open_archive_reader(path)?)?;
         return Ok(reader
             .entries
             .iter()
@@ -756,7 +823,7 @@ fn list_extended_archive(path: &Path) -> Result<Vec<ArchiveEntry>> {
             })
             .collect());
     }
-    let mut reader = libarchive2::ReadArchive::open(path)?;
+    let mut reader = open_extended_archive(path)?;
     let mut entries = Vec::new();
     while let Some(entry) = reader.next_entry()? {
         crate::task_queue::checkpoint()?;
@@ -789,7 +856,7 @@ fn validate_extended_entry(entry: &libarchive2::Entry<'_>) -> Result<()> {
 
 fn extract_extended_entry(path: &Path, name: &str, output: &mut impl Write) -> Result<()> {
     if ResolvedFormat::from_path(path) == Some(ResolvedFormat::Xar) {
-        let mut reader = crate::xar::XarReader::new(File::open(path)?)?;
+        let mut reader = crate::xar::XarReader::new(open_archive_reader(path)?)?;
         let entry = reader
             .entries
             .iter()
@@ -800,7 +867,7 @@ fn extract_extended_entry(path: &Path, name: &str, output: &mut impl Write) -> R
         crate::task_queue::copy(&mut reader.entry_reader(&entry)?, output)?;
         return Ok(());
     }
-    let mut reader = libarchive2::ReadArchive::open(path)?;
+    let mut reader = open_extended_archive(path)?;
     while let Some(entry) = reader.next_entry()? {
         if entry.pathname().as_deref() != Some(name) {
             continue;
@@ -818,7 +885,7 @@ fn extract_extended_entry(path: &Path, name: &str, output: &mut impl Write) -> R
 
 fn extract_extended_tree(path: &Path, destination: &Path, selection: Option<&Path>) -> Result<()> {
     if ResolvedFormat::from_path(path) == Some(ResolvedFormat::Xar) {
-        let mut reader = crate::xar::XarReader::new(File::open(path)?)?;
+        let mut reader = crate::xar::XarReader::new(open_archive_reader(path)?)?;
         for entry in reader.entries.clone() {
             anyhow::ensure!(
                 entry.file_type != xara::XarFileType::Symlink && entry.link.is_none(),
@@ -839,7 +906,7 @@ fn extract_extended_tree(path: &Path, destination: &Path, selection: Option<&Pat
         }
         return Ok(());
     }
-    let mut reader = libarchive2::ReadArchive::open(path)?;
+    let mut reader = open_extended_archive(path)?;
     while let Some(entry) = reader.next_entry()? {
         validate_extended_entry(&entry)?;
         let name = entry.pathname().context("Archive entry has no filename")?;
@@ -858,7 +925,7 @@ fn extract_extended_tree(path: &Path, destination: &Path, selection: Option<&Pat
 /// Lists the single decompressed file represented by a standalone codec stream.
 fn list_single_compressed(path: &Path, format: ResolvedFormat) -> Result<Vec<ArchiveEntry>> {
     let name = single_compressed_entry_name(path)?;
-    let file = File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+    let file = open_archive_reader(path)?;
     let mut reader = decode_archive_stream(file, format)?;
     let size = crate::task_queue::copy(&mut reader, &mut io::sink())?;
     Ok(vec![ArchiveEntry {
@@ -873,6 +940,8 @@ fn list_single_compressed(path: &Path, format: ResolvedFormat) -> Result<Vec<Arc
 
 /// Removes a standalone compression suffix to recover the decompressed filename.
 pub(crate) fn single_compressed_entry_name(path: &Path) -> Result<String> {
+    let base = crate::volumes::numbered_base(path);
+    let path = base.as_deref().unwrap_or(path);
     let format = ResolvedFormat::from_path(path).context("Unsupported compressed file format")?;
     anyhow::ensure!(
         format.capabilities().can_extract && format.is_single_compressed(),
@@ -1308,11 +1377,12 @@ fn write_rar_archive_with_program(
 }
 
 pub(crate) fn can_add_to_archive(path: &Path) -> bool {
-    ResolvedFormat::from_path(path).is_some_and(|format| format.capabilities().can_modify)
+    !is_multipart_archive(path)
+        && ResolvedFormat::from_path(path).is_some_and(|format| format.capabilities().can_modify)
 }
 
 pub(crate) fn can_replace_archive_entry(path: &Path) -> bool {
-    ResolvedFormat::from_path(path)
+    !is_multipart_archive(path) && ResolvedFormat::from_path(path)
         .is_some_and(|format| format.capabilities().can_modify && format != ResolvedFormat::Rar)
 }
 
@@ -1327,6 +1397,7 @@ pub(crate) fn add_to_archive_with_password(
     folder: &str,
     password: Option<&str>,
 ) -> Result<()> {
+    anyhow::ensure!(!is_multipart_archive(path), "Multipart archives are read-only");
     let format = ResolvedFormat::from_path(path).context("Unsupported archive format")?;
     anyhow::ensure!(
         format.archive.is_some(),
@@ -1446,6 +1517,7 @@ pub(crate) fn add_to_archive_with_password(
 }
 
 pub(crate) fn remove_archive_entry(path: &Path, name: &str, password: Option<&str>) -> Result<()> {
+    anyhow::ensure!(!is_multipart_archive(path), "Multipart archives are read-only");
     let format = ResolvedFormat::from_path(path).context("Unsupported archive format")?;
     anyhow::ensure!(
         format.capabilities().can_modify,
@@ -1513,6 +1585,7 @@ pub(crate) fn replace_archive_entry_with_password(
     contents: &[u8],
     password: Option<&str>,
 ) -> Result<()> {
+    anyhow::ensure!(!is_multipart_archive(path), "Multipart archives are read-only");
     let format = ResolvedFormat::from_path(path).context("Unsupported archive format")?;
     anyhow::ensure!(
         format.capabilities().can_modify && format != ResolvedFormat::Rar,
@@ -2097,7 +2170,7 @@ fn read_entry_range(
             "Archive entry not found"
         );
         return Ok(read_entry_bytes(
-            &mut guarded(decode_archive_stream(File::open(path)?, format)?),
+            &mut guarded(decode_archive_stream(open_archive_reader(path)?, format)?),
             cancel,
             offset,
             max_bytes,
@@ -2119,7 +2192,7 @@ fn read_entry_range(
     }
     match format {
         ResolvedFormat::Zip => {
-            let mut archive = ZipArchive::new(File::open(path)?)?;
+            let mut archive = ZipArchive::new(open_archive_reader(path)?)?;
             let mut entry = if let Some(password) = password {
                 archive.by_name_decrypt(entry_name, password.as_bytes())
             } else {
@@ -2135,8 +2208,8 @@ fn read_entry_range(
             Ok(read_entry_bytes(&mut entry, cancel, offset, max_bytes)?)
         }
         ResolvedFormat::SevenZip => {
-            let file = File::open(path)?;
-            let length = file.metadata()?.len();
+            let file = open_archive_reader(path)?;
+            let length = file.len();
             let input_budget = Cell::new(64 * 1024 * 1024);
             let reader = GuardedReader {
                 reader: file,
@@ -2201,7 +2274,7 @@ fn read_entry_range(
             bytes.context("Archive entry not found")
         }
         ResolvedFormat::Xar => {
-            let mut archive = crate::xar::XarReader::new(File::open(path)?)?;
+            let mut archive = crate::xar::XarReader::new(open_archive_reader(path)?)?;
             let entry = archive
                 .entries
                 .iter()
@@ -2217,9 +2290,11 @@ fn read_entry_range(
         }
         _ => {
             let mut archive = if let Some(password) = password {
-                libarchive2::ReadArchive::open_with_passphrase(path, password)?
+                let mut archive = open_extended_archive(path)?;
+                archive.add_passphrase(password)?;
+                archive
             } else {
-                libarchive2::ReadArchive::open(path)?
+                open_extended_archive(path)?
             };
             for _ in 0..20_000 {
                 if cancel.load(Ordering::Relaxed) {
@@ -2299,8 +2374,7 @@ pub fn extract_entry_with_password(
             extract_extended_entry(path, entry_name, &mut output)?;
         }
         ResolvedFormat::Zip => {
-            let file =
-                File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+            let file = open_archive_reader(path)?;
             let mut archive = ZipArchive::new(file).context("Invalid ZIP archive")?;
             let mut entry = if let Some(password) = password {
                 archive.by_name_decrypt(entry_name, password.as_bytes())
@@ -2327,7 +2401,7 @@ pub fn extract_entry_with_password(
                 entry_name == name,
                 "Standalone compressed file entry not found"
             );
-            let file = File::open(path)?;
+            let file = open_archive_reader(path)?;
             let mut reader = decode_archive_stream(file, format)?;
             crate::task_queue::copy(&mut reader, &mut output)?;
         }
@@ -2345,9 +2419,7 @@ pub fn extract_entry_with_password(
             &mut output,
         )?,
         ResolvedFormat::SevenZip => {
-            let mut archive =
-                SevenZReader::open(path, password.map(Password::from).unwrap_or_default())
-                    .map_err(|error| seven_zip_error(error, password))?;
+            let mut archive = open_seven_zip(path, password)?;
             let mut found = false;
             archive
                 .for_each_entries(|entry, reader| {
@@ -2443,7 +2515,7 @@ pub fn extract_archive_selection_to(
             extract_extended_tree(path, staged.path(), selection.as_deref())?;
         }
         ResolvedFormat::Zip => {
-            let mut archive = ZipArchive::new(File::open(path)?)?;
+            let mut archive = ZipArchive::new(open_archive_reader(path)?)?;
             for index in 0..archive.len() {
                 crate::task_queue::checkpoint()?;
                 let mut entry = if let Some(password) = password {
@@ -2488,7 +2560,7 @@ pub fn extract_archive_selection_to(
         | ResolvedFormat::Lzip
         | ResolvedFormat::Brotli => {
             let name = single_compressed_entry_name(path)?;
-            let file = File::open(path)?;
+            let file = open_archive_reader(path)?;
             let mut reader = decode_archive_stream(file, format)?;
             write_extracted_entry(
                 staged.path(),
@@ -2499,9 +2571,7 @@ pub fn extract_archive_selection_to(
             )?;
         }
         ResolvedFormat::SevenZip => {
-            let mut archive =
-                SevenZReader::open(path, password.map(Password::from).unwrap_or_default())
-                    .map_err(|error| seven_zip_error(error, password))?;
+            let mut archive = open_seven_zip(path, password)?;
             archive
                 .for_each_entries(|entry, reader| {
                     write_extracted_entry(
@@ -2652,7 +2722,7 @@ fn temporary_suffix(entry_name: &str) -> String {
 
 /// Lists ZIP entries and validates encrypted streams when a password is supplied.
 fn list_zip(path: &Path, password: Option<&str>) -> Result<Vec<ArchiveEntry>> {
-    let file = File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+    let file = open_archive_reader(path)?;
     let mut archive = ZipArchive::new(file).context("Invalid ZIP archive")?;
     let mut entries = Vec::with_capacity(archive.len());
 
@@ -2728,8 +2798,7 @@ fn list_tar<R: Read>(reader: R, path: &Path) -> Result<Vec<ArchiveEntry>> {
 
 /// Lists 7z entries and drains content streams to verify encrypted data when needed.
 fn list_seven_zip(path: &Path, password: Option<&str>) -> Result<Vec<ArchiveEntry>> {
-    let mut archive = SevenZReader::open(path, password.map(Password::from).unwrap_or_default())
-        .map_err(|error| seven_zip_error(error, password))?;
+    let mut archive = open_seven_zip(path, password)?;
     let encrypted = archive
         .archive()
         .folders

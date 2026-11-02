@@ -21,6 +21,7 @@ mod text_preview;
 mod task_queue;
 mod transfer;
 mod ui;
+mod volumes;
 
 use archive::{ArchiveEntry, is_supported_archive, list_archive};
 use gpui::component::menu::ContextMenuExt;
@@ -1822,7 +1823,11 @@ fn entry_icon(entry: &ArchiveEntry) -> &'static str {
         .rsplit_once('.')
         .map(|(_, extension)| extension.to_ascii_uppercase())
         .unwrap_or_default();
-    let icon = file_icon(&extension);
+    let icon = if archive::is_supported_archive(std::path::Path::new(&entry.name)) {
+        "archive"
+    } else {
+        file_icon(&extension)
+    };
     if entry.is_encrypted && icon == "archive" {
         "archive-locked"
     } else {
