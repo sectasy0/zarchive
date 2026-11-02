@@ -44,6 +44,22 @@ pub(crate) struct ArchiveCreationForm {
 }
 
 impl ArchiveCreationForm {
+    fn generate_password(&mut self) {
+        if !self.encrypt || !self.options.format.supports_password() {
+            return;
+        }
+        match crate::secret::generate_password() {
+            Ok(password) => {
+                self.password.clear();
+                self.confirmation.clear();
+                self.confirmation.text = password.clone();
+                self.password.text = password;
+                self.error = None;
+            }
+            Err(_) => self.error = Some("Could not securely generate a password".to_owned()),
+        }
+    }
+
     /// Creates a form with default archive options and fresh secret inputs.
     pub fn new(cx: &mut App) -> Self {
         Self {
@@ -493,13 +509,32 @@ pub(crate) fn view(
                 },
             ))
             .when(form.encrypt, |this| {
-                this.child(language.text("Password"))
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(language.text("Password"))
+                        .child(
+                            Button::new("generate-archive-password")
+                                .debug_selector(|| "generate-archive-password".to_owned())
+                                .icon(gpui::assets::IconName::KeyRound)
+                                .label(language.text("Generate password"))
+                                .ghost()
+                                .small()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.creation.generate_password();
+                                    cx.notify();
+                                })),
+                        ),
+                )
                     .child(crate::secret::field(
                         "creation-password",
                         &form.password,
                         crate::secret::SecretField::Password,
                         true,
-                        theme,
+                        language,
                         cx,
                     ))
                     .child(language.text("Confirm password"))
@@ -508,7 +543,7 @@ pub(crate) fn view(
                         &form.confirmation,
                         crate::secret::SecretField::Confirmation,
                         true,
-                        theme,
+                        language,
                         cx,
                     ))
                     .when(form.options.format == ResolvedFormat::SevenZip, |this| {
@@ -578,6 +613,33 @@ mod tests {
     use super::*;
     use crate::Modal;
     use gpui::Modifiers;
+
+    #[gpui::test]
+    fn generated_passwords_are_random_confirmed_and_cleared(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let mut form = ArchiveCreationForm::new(cx);
+            form.generate_password();
+            assert!(form.password.text.is_empty());
+            form.encrypt = true;
+            for format in [ResolvedFormat::Zip, ResolvedFormat::SevenZip] {
+                form.options.format = format;
+                form.generate_password();
+                assert!(form.validate_password().is_ok());
+                assert_eq!(form.password.text.len(), 24);
+                assert!(form.password.text.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+                }));
+                let previous = form.password.text.clone();
+                form.generate_password();
+                assert!(form.password.text.as_str() != previous.as_str());
+                assert!(form.validate_password().is_ok());
+            }
+            form.apply(ChoiceField::Format, 1);
+            form.generate_password();
+            assert!(form.password.text.is_empty());
+            assert!(form.confirmation.text.is_empty());
+        });
+    }
 
     #[gpui::test]
     /// Keeps the action footer visible and within the dialog at compact sizes.

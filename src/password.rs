@@ -205,7 +205,7 @@ pub fn view(
             &prompt.input,
             SecretField::Unlock,
             !checking,
-            theme,
+            language,
             cx,
         ))
         .child(
