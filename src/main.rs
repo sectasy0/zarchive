@@ -16,6 +16,7 @@ mod operations;
 mod password;
 mod preferences;
 mod secret;
+mod security;
 mod toolbar;
 mod text_preview;
 mod task_queue;

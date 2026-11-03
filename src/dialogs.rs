@@ -120,6 +120,7 @@ enum AdvancedSettingField {
     PreviewLimit,
     CsvRows,
     CsvColumns,
+    AuditDepth,
 }
 
 impl AdvancedSettingField {
@@ -128,6 +129,7 @@ impl AdvancedSettingField {
             Self::PreviewLimit => "preview-limit",
             Self::CsvRows => "csv-row-limit",
             Self::CsvColumns => "csv-column-limit",
+            Self::AuditDepth => "audit-depth",
         }
     }
 
@@ -136,6 +138,7 @@ impl AdvancedSettingField {
             Self::PreviewLimit => "Maximum preview size",
             Self::CsvRows => "CSV preview row limit",
             Self::CsvColumns => "CSV preview column limit",
+            Self::AuditDepth => "Nested archive audit depth",
         }
     }
 }
@@ -163,6 +166,12 @@ fn advanced_setting_bounds(
             *AdvancedSettings::CSV_MAX_COLUMNS_RANGE.end(),
             "",
         ),
+        AdvancedSettingField::AuditDepth => (
+            manager.advanced_settings.audit_max_depth,
+            *AdvancedSettings::AUDIT_MAX_DEPTH_RANGE.start(),
+            *AdvancedSettings::AUDIT_MAX_DEPTH_RANGE.end(),
+            "",
+        ),
     }
 }
 
@@ -176,6 +185,7 @@ fn adjust_advanced_setting(
         AdvancedSettingField::PreviewLimit => 16,
         AdvancedSettingField::CsvRows => 500,
         AdvancedSettingField::CsvColumns => 8,
+        AdvancedSettingField::AuditDepth => 1,
     };
     let value = if increase {
         value.saturating_add(step).min(maximum)
@@ -186,6 +196,7 @@ fn adjust_advanced_setting(
         AdvancedSettingField::PreviewLimit => manager.advanced_settings.preview_limit_kib = value,
         AdvancedSettingField::CsvRows => manager.advanced_settings.csv_max_rows = value,
         AdvancedSettingField::CsvColumns => manager.advanced_settings.csv_max_columns = value,
+        AdvancedSettingField::AuditDepth => manager.advanced_settings.audit_max_depth = value,
     }
     manager.save_preferences();
 }
@@ -560,6 +571,12 @@ fn settings_view(
                 .child(advanced_setting_stepper(
                     manager,
                     AdvancedSettingField::CsvColumns,
+                    theme,
+                    cx,
+                ))
+                .child(advanced_setting_stepper(
+                    manager,
+                    AdvancedSettingField::AuditDepth,
                     theme,
                     cx,
                 ));

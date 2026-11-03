@@ -82,11 +82,14 @@ available while your files are processed.
 - **Verify integrity.** Read archive data in the background, validate available
   checksums, and calculate CRC32 and SHA-256 during a full integrity check.
 - **Audit individual archives or batches.** Identify suspicious paths, duplicate
-  content, nested archives, unusual compression ratios, and mismatches between
-  file signatures and extensions. Copy inspection reports as JSON. Choose
+  content, archive bombs, possible polyglot files, executable content, NTFS
+  alternate data streams, unsafe links, and mismatches between signatures and
+  extensions. Analyze nested archives to a configurable depth and copy reports
+  with detected content types and active limits as JSON. Choose
   **Full audit** to bypass the standard limits of 32 archives per batch, 20,000
   entries, 256 MiB per entry, 1 GiB total data, and 500 findings. The 7z
-  dictionary safety limit of 128 MiB remains in effect.
+  dictionary safety limit of 128 MiB, expansion protection, signature-record
+  limit, and nested-audit budgets remain in effect.
 - **Compare two archives.** Select archive A and archive B in separate fields to
   compare files, directories, moves and renames, empty folders, content, and
   available metadata. Results distinguish byte equality from semantic equality
@@ -258,6 +261,71 @@ Preview, integrity checking, and auditing serve different purposes: displaying
 an archive's file list does not verify its data. Auditing highlights items that
 deserve attention; it is not an antivirus scanner. Checks operate within resource
 limits, and incomplete inspections are not reported as fully successful.
+
+### Security Audit
+
+The audit combines metadata rules, file signatures from `infer`, and bounded
+content analysis. It reports:
+
+- **Archive bombs:** extreme declared, observed, or aggregate expansion ratios.
+  Decompression stops when a dangerous ratio is observed, including in ZIP and
+  standalone compressed streams. Reaching a safety limit makes the audit
+  incomplete rather than marking unread data as verified.
+- **Possible polyglots:** correlated signatures of multiple formats, such as
+  an image or executable with a ZIP container, or an image with PDF markers.
+  Self-extracting archives and legitimate embedded containers can also trigger
+  these findings.
+- **Executable content:** programs, scripts, installers, shortcuts, executable
+  signatures, and deceptive double extensions such as `invoice.pdf.exe`.
+- **NTFS alternate data streams:** colon-delimited stream names in path
+  components, including names nested inside subdirectories.
+- **Suspicious links:** symlink or hardlink targets outside the archive root,
+  link cycles, and excessive link chains. Links are examined as metadata or
+  bounded target text; they are never followed.
+- **Unusual structures and parser anomalies:** overlapping ZIP entry ranges,
+  inconsistent sizes or headers, file/directory conflicts, platform-dependent
+  name collisions, reserved Windows names, excessive path depth, and control
+  or bidirectional formatting characters. These are potential parser-risk
+  indicators, not proof of a working exploit.
+
+Set **Settings > Advanced > Nested archive audit depth** from 0 to 8. The default
+is 2; 0 reports nested archives without recursively inspecting them. Nested
+findings use paths such as `outer.zip!inner.zip!invoice.pdf.exe`. Nested files are
+streamed into private temporary files, never extracted using their stored paths,
+and are removed after inspection. Encrypted nested archives are reported as
+uninspected; their passwords are not guessed or brute-forced.
+
+Each top-level audit has hard nested limits of 64 archives, 32 MiB per staged
+archive or nested entry, and 256 MiB of shared nested input/content reads.
+Nested scans retain the standard bounded audit mode even when the parent uses
+Full audit. Depth, budget, cancellation, encrypted content, or nested parser
+failures prevent a fully successful audit. Reports retain at most 20,000 content
+signatures. Checks use bounded prefixes and suffixes, so not every polyglot,
+malware family, or parser exploit can be detected. Archive parsers run in the
+application process; the audit is not a sandbox or an antivirus scanner.
+
+### Try the Security Audit
+
+Generate the small, harmless manual examples with:
+
+```sh
+cargo test --locked generate_security_audit_samples -- --ignored --nocapture
+```
+
+Set **Settings > Advanced > Nested archive audit depth** to **2**, open a sample,
+and choose **Audit archive**. Review its findings rather than extracting it.
+
+| Sample | Expected result |
+| :--- | :--- |
+| `samples/35-security-audit.zip` | Executable names, double extensions, ADS, signature mismatch, a GIF/ZIP polyglot, unsafe links, path conflicts, and findings two ZIP levels deep. Integrity passes because its bytes are intact; this does not mean the contents are safe. |
+| `samples/36-bounded-expansion.zip` | Archive bomb warning and an incomplete audit. A tiny ZIP expands to a fixed 12 MiB of zeros; it is not an unbounded bomb. |
+| `samples/37-parser-anomaly.zip` | Parser anomaly warning and an incomplete audit caused by deliberately aliased ZIP entry ranges. |
+
+The executable-looking entries contain plain text, not runnable programs.
+Links and unusual filenames exist only as archive entries; the generator does
+not create external files or actual filesystem links. Existing samples are
+verified, not overwritten. The sample directory is ignored by Git; the generator
+and its regression test are part of the repository.
 
 ## Cross-Platform
 

@@ -455,6 +455,7 @@ impl ArchiveManager {
         let control = crate::task_queue::TaskControl::with_cancel(cancel.clone()).for_paths(sources.iter().map(|(path, _)| path.clone()));
         let total = sources.len() as u64;
         let revision = self.inspector.revision;
+        let audit_options = inspection::AuditOptions { max_depth: self.advanced_settings.audit_max_depth.min(8) as u8 };
         self.inspector.task = Some(self.background_queue.enqueue(
             "Inspecting archive...",
             control,
@@ -465,11 +466,12 @@ impl ArchiveManager {
             for (path, password) in sources {
                 if !control.checkpoint() { anyhow::bail!("cancelled"); }
                 reporter.phase(path.file_name().unwrap_or_default().to_string_lossy());
-                reports.push(inspection::inspect(
+                reports.push(inspection::inspect_with_options(
                     &path,
                     password.as_ref().map(|password| password.as_str()),
                     mode,
                     &cancel,
+                    audit_options,
                 ));
                 reporter.advance(1);
             }
@@ -1903,6 +1905,39 @@ mod tests {
     }
 
     #[gpui::test]
+    fn full_audit_menu_completes_for_nested_archives(cx: &mut gpui::TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("invoice.pdf.exe");
+        std::fs::write(&source, b"Harmless text for the Full audit menu regression.").unwrap();
+        let inner = root.path().join("inner.zip");
+        crate::archive::create_zip(&inner, &[source]).unwrap();
+        let middle = root.path().join("middle.zip");
+        crate::archive::create_zip(&middle, &[inner]).unwrap();
+        let path = root.path().join("outer.zip");
+        crate::archive::create_zip(&path, &[middle]).unwrap();
+        let (view, cx) = crate::tests::component_window(cx, |_, cx| {
+            let mut manager = crate::tests::test_manager(cx);
+            manager.current_directory = None;
+            manager.archive_path = Some(path.clone());
+            manager.archive_name = Some("outer.zip".to_owned());
+            manager.entries = crate::archive::list_archive(&path).unwrap();
+            manager
+        });
+        click_inspect_action(cx, "Full audit");
+        complete(cx, &view);
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert!(!manager.inspector.is_busy());
+            assert!(manager.inspector.mode == InspectionMode::FullAudit);
+            let report = &manager.inspector.reports[0];
+            assert_eq!(report.integrity, Integrity::Passed, "{:?}", report.error);
+            assert_eq!(report.json()["nested_audit"]["archives_inspected"], 2);
+            assert!(report.findings.iter().any(|finding| finding.kind == "Double extension"
+                && finding.entry == "middle.zip!inner.zip!invoice.pdf.exe"));
+        });
+    }
+
+    #[gpui::test]
     /// Preserves audit findings when the same archive is tested for integrity afterward.
     fn integrity_test_keeps_findings_from_previous_audit(cx: &mut gpui::TestAppContext) {
         let root = tempfile::tempdir().unwrap();
@@ -2179,6 +2214,40 @@ mod tests {
         cx.update(|window, cx| window.simulate_next_frame(cx));
         cx.run_until_parked();
         assert!(cx.debug_bounds("unlock-password").is_some());
+    }
+
+    #[gpui::test]
+    fn security_audit_depth_is_rendered_and_used_by_background_inspections(cx: &mut gpui::TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("invoice.pdf.exe");
+        std::fs::write(&source, b"#!/bin/sh\nexit 0\n").unwrap();
+        let inner = root.path().join("inner.zip");
+        crate::archive::create_zip(&inner, &[source]).unwrap();
+        let outer = root.path().join("outer.zip");
+        crate::archive::create_zip(&outer, &[inner]).unwrap();
+        let (view, cx) = crate::tests::component_window(cx, |window, cx| {
+            let mut manager = crate::tests::test_manager(cx);
+            manager.settings_category = crate::SettingsCategory::Advanced;
+            manager.show_modal(crate::Modal::Settings, window, cx);
+            manager
+        });
+        assert!(cx.debug_bounds("advanced-setting-audit-depth").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        for depth in [0, 1] {
+            cx.update(|window, cx| view.update(cx, |manager, cx| {
+                manager.advanced_settings.audit_max_depth = depth;
+                manager.inspect_sources(vec![(outer.clone(), None)], InspectionMode::Audit, window, cx);
+            }));
+            complete(cx, &view);
+            cx.read(|cx| {
+                let manager = view.read(cx);
+                assert!(!manager.inspector.is_busy());
+                let report = &manager.inspector.reports[0];
+                assert_eq!(report.json()["nested_audit"]["max_depth"], depth);
+                assert_eq!(report.findings.iter().any(|finding| finding.kind == "Double extension"), depth > 0);
+            });
+        }
     }
 
     #[gpui::test]
@@ -3434,6 +3503,7 @@ fn finding_row(
     let severe = matches!(
         finding.kind,
         "Damaged archive" | "Damaged entry" | "Unsafe path" | "Format mismatch"
+            | "Archive bomb" | "Parser anomaly" | "Suspicious link" | "Alternate data stream"
     );
     let foreground = if theme.window < 0x808080 {
         if severe { 0xfca5a5 } else { 0xfcd34d }

@@ -115,12 +115,14 @@ pub(crate) struct AdvancedSettings {
     pub(crate) csv_max_rows: u32,
     /// Maximum CSV columns rendered in the preview table.
     pub(crate) csv_max_columns: u32,
+    pub(crate) audit_max_depth: u32,
 }
 
 impl AdvancedSettings {
     pub(crate) const PREVIEW_LIMIT_RANGE: std::ops::RangeInclusive<u32> = 16..=1024;
     pub(crate) const CSV_MAX_ROWS_RANGE: std::ops::RangeInclusive<u32> = 500..=50_000;
     pub(crate) const CSV_MAX_COLUMNS_RANGE: std::ops::RangeInclusive<u32> = 8..=512;
+    pub(crate) const AUDIT_MAX_DEPTH_RANGE: std::ops::RangeInclusive<u32> = 0..=8;
 
     pub(crate) fn preview_max_bytes(self) -> usize {
         self.preview_limit_kib as usize * 1024
@@ -141,6 +143,7 @@ impl Default for AdvancedSettings {
             preview_limit_kib: 128,
             csv_max_rows: 5_000,
             csv_max_columns: 64,
+            audit_max_depth: 2,
         }
     }
 }
@@ -229,6 +232,11 @@ impl UserPreferences {
                         AdvancedSettings::default().csv_max_columns,
                         AdvancedSettings::CSV_MAX_COLUMNS_RANGE,
                     ),
+                    audit_max_depth: AdvancedSettings::bounded_u32(
+                        advanced.and_then(|value| value.get("audit_max_depth")),
+                        AdvancedSettings::default().audit_max_depth,
+                        AdvancedSettings::AUDIT_MAX_DEPTH_RANGE,
+                    ),
                 }
             },
         }
@@ -260,6 +268,7 @@ impl UserPreferences {
                 "preview_limit_kib": self.advanced.preview_limit_kib,
                 "csv_max_rows": self.advanced.csv_max_rows,
                 "csv_max_columns": self.advanced.csv_max_columns,
+                "audit_max_depth": self.advanced.audit_max_depth,
             },
         });
         std::fs::write(path, serde_json::to_vec_pretty(&value)?)?;
@@ -347,6 +356,23 @@ mod tests {
     }
 
     #[test]
+    fn security_audit_depth_defaults_and_roundtrips_with_bounds() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("settings.json");
+        assert_eq!(UserPreferences::load(&path).advanced.audit_max_depth, 2);
+        for depth in [0, 2, 8] {
+            let mut preferences = UserPreferences::default();
+            preferences.advanced.audit_max_depth = depth;
+            preferences.save(&path).unwrap();
+            assert_eq!(UserPreferences::load(&path).advanced.audit_max_depth, depth);
+        }
+        std::fs::write(&path, br#"{"advanced":{"audit_max_depth":999}}"#).unwrap();
+        assert_eq!(UserPreferences::load(&path).advanced.audit_max_depth, 8);
+        std::fs::write(&path, br#"{"advanced":{"audit_max_depth":-1}}"#).unwrap();
+        assert_eq!(UserPreferences::load(&path).advanced.audit_max_depth, 2);
+    }
+
+    #[test]
     fn advanced_preview_limits_round_trip_and_are_clamped() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("settings.json");
@@ -354,6 +380,7 @@ mod tests {
             preview_limit_kib: 256,
             csv_max_rows: 12_000,
             csv_max_columns: 128,
+            audit_max_depth: 4,
         };
         let preferences = UserPreferences {
             advanced,
@@ -364,7 +391,7 @@ mod tests {
 
         std::fs::write(
             &path,
-            r#"{"advanced":{"preview_limit_kib":1,"csv_max_rows":999999,"csv_max_columns":0}}"#,
+            r#"{"advanced":{"preview_limit_kib":1,"csv_max_rows":999999,"csv_max_columns":0,"audit_max_depth":999}}"#,
         )
         .unwrap();
         assert_eq!(
@@ -373,6 +400,7 @@ mod tests {
                 preview_limit_kib: *AdvancedSettings::PREVIEW_LIMIT_RANGE.start(),
                 csv_max_rows: *AdvancedSettings::CSV_MAX_ROWS_RANGE.end(),
                 csv_max_columns: *AdvancedSettings::CSV_MAX_COLUMNS_RANGE.start(),
+                audit_max_depth: *AdvancedSettings::AUDIT_MAX_DEPTH_RANGE.end(),
             }
         );
     }

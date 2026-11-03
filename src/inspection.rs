@@ -36,9 +36,9 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
-    io::{Read, Seek},
+    io::{Read, Seek, Write},
     path::Path,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{Arc, atomic::{AtomicBool, AtomicU8, Ordering}},
 };
 
 const MAX_ENTRIES: usize = 20_000;
@@ -46,6 +46,81 @@ const MAX_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_FINDINGS: usize = 500;
 const MAX_SEVENZIP_DICTIONARY_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_NESTED_ARCHIVES: usize = 64;
+const MAX_NESTED_ARCHIVE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_NESTED_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+
+#[derive(Debug)]
+struct InspectionLimit;
+
+impl std::fmt::Display for InspectionLimit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Inspection limit reached")
+    }
+}
+
+impl std::error::Error for InspectionLimit {}
+
+#[derive(Debug)]
+struct ExpansionLimit { bomb: bool }
+
+impl std::fmt::Display for ExpansionLimit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Archive expansion safety limit reached")
+    }
+}
+
+impl std::error::Error for ExpansionLimit {}
+
+struct ExpansionReader<'a, R> {
+    inner: R,
+    bytes: &'a std::cell::Cell<u64>,
+    limit: u64,
+    bomb: bool,
+    stopped: Arc<AtomicU8>,
+}
+
+impl<R: Read> Read for ExpansionReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        crate::task_queue::checkpoint()?;
+        if buffer.is_empty() { return Ok(0); }
+        let remaining = self.limit.saturating_sub(self.bytes.get());
+        if remaining == 0 {
+            let mut probe = [0u8; 1];
+            if self.inner.read(&mut probe)? == 0 { return Ok(0); }
+            self.stopped.store(if self.bomb { 2 } else { 1 }, Ordering::Relaxed);
+            return Err(std::io::Error::other(ExpansionLimit { bomb: self.bomb }));
+        }
+        let length = remaining.min(buffer.len() as u64) as usize;
+        let count = self.inner.read(&mut buffer[..length])?;
+        self.bytes.set(self.bytes.get().saturating_add(count as u64));
+        Ok(count)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct AuditOptions {
+    pub max_depth: u8,
+}
+
+impl Default for AuditOptions {
+    fn default() -> Self { Self { max_depth: 2 } }
+}
+
+#[derive(Clone, Copy)]
+struct AuditState {
+    options: AuditOptions,
+    depth: u8,
+    archives_left: usize,
+    bytes_left: u64,
+}
+
+impl AuditState {
+    fn new(options: AuditOptions) -> Self {
+        Self { options: AuditOptions { max_depth: options.max_depth.min(8) }, depth: 0,
+            archives_left: MAX_NESTED_ARCHIVES, bytes_left: MAX_NESTED_TOTAL_BYTES }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Selects metadata preview, content verification, or security auditing.
@@ -195,6 +270,7 @@ pub struct Report {
     pub entries: Vec<EntryInfo>,
     /// Findings produced by integrity and audit checks.
     pub findings: Vec<Finding>,
+    pub(crate) content_signatures: BTreeMap<String, String>,
     /// Overall integrity outcome.
     pub integrity: Integrity,
     /// Whether any configured inspection limit was reached.
@@ -202,6 +278,9 @@ pub struct Report {
     /// Top-level error encountered while inspecting the archive.
     pub error: Option<String>,
     full_audit: bool,
+    audit: AuditState,
+    audit_bytes_read: u64,
+    expansion_stopped: Arc<AtomicU8>,
 }
 
 impl Report {
@@ -225,13 +304,21 @@ impl Report {
                 "sha256": entry.sha256, "encrypted": entry.encrypted, "link": entry.link, "error": entry.error,
             })).collect::<Vec<_>>(),
             "findings": self.findings.iter().map(|finding| serde_json::json!({"kind": finding.kind, "entry": finding.entry, "detail": finding.detail})).collect::<Vec<_>>(),
+            "content_signatures": self.content_signatures,
             "full_audit": self.full_audit,
+            "nested_audit": { "max_depth": self.audit.options.max_depth,
+                "archives_inspected": MAX_NESTED_ARCHIVES - self.audit.archives_left,
+                "bytes_consumed": MAX_NESTED_TOTAL_BYTES - self.audit.bytes_left },
             "limits": {
                 "max_entries": (!self.full_audit).then_some(MAX_ENTRIES),
                 "max_entry_bytes": (!self.full_audit).then_some(MAX_ENTRY_BYTES),
                 "max_total_bytes": (!self.full_audit).then_some(MAX_TOTAL_BYTES),
                 "max_findings": (!self.full_audit).then_some(MAX_FINDINGS),
                 "max_sevenz_dictionary_bytes": MAX_SEVENZIP_DICTIONARY_BYTES,
+                "max_nested_archives": MAX_NESTED_ARCHIVES,
+                "max_nested_archive_bytes": MAX_NESTED_ARCHIVE_BYTES,
+                "max_nested_total_bytes": MAX_NESTED_TOTAL_BYTES,
+                "max_content_signatures": crate::security::MAX_SIGNATURES,
             },
         })
     }
@@ -246,7 +333,7 @@ impl Report {
         (self.archive_size > 0).then(|| self.unpacked_size() as f64 / self.archive_size as f64)
     }
     /// Adds a finding until the report's bounded finding limit is reached.
-    fn finding(&mut self, kind: &'static str, entry: impl Into<String>, detail: impl Into<String>) {
+    pub(crate) fn finding(&mut self, kind: &'static str, entry: impl Into<String>, detail: impl Into<String>) {
         if self.full_audit || self.findings.len() < MAX_FINDINGS {
             self.findings.push(Finding {
                 kind,
@@ -398,6 +485,16 @@ pub fn inspect(
     mode: InspectionMode,
     cancel: &AtomicBool,
 ) -> Report {
+    inspect_with_options(path, password, mode, cancel, AuditOptions::default())
+}
+
+pub fn inspect_with_options(path: &Path, password: Option<&str>, mode: InspectionMode,
+    cancel: &AtomicBool, options: AuditOptions) -> Report {
+    inspect_with_state(path, password, mode, cancel, AuditState::new(options))
+}
+
+fn inspect_with_state(path: &Path, password: Option<&str>, mode: InspectionMode,
+    cancel: &AtomicBool, audit: AuditState) -> Report {
     let mut report = Report {
         path: path.to_path_buf(),
         detected: None,
@@ -415,16 +512,30 @@ pub fn inspect(
         archive_sha256: None,
         entries: Vec::new(),
         findings: Vec::new(),
+        content_signatures: BTreeMap::new(),
         integrity: Integrity::NotTested,
         limited: false,
         error: None,
         full_audit: mode.is_full_audit(),
+        audit,
+        audit_bytes_read: 0,
+        expansion_stopped: Arc::new(AtomicU8::new(0)),
     };
     if let Err(error) = inspect_inner(&mut report, password, mode, cancel) {
+        let expansion = error.chain().find_map(|source| source.downcast_ref::<ExpansionLimit>().map(|limit| limit.bomb))
+            .or_else(|| match report.expansion_stopped.load(Ordering::Relaxed) {
+                1 => Some(false), 2 => Some(true), _ => None,
+            });
         if matches!(error.downcast_ref::<crate::xar::ReadError>(), Some(crate::xar::ReadError::Limit)) {
             report.limited = true;
         }
-        if error.downcast_ref::<PasswordFailure>().is_some() {
+        if let Some(expansion) = expansion {
+            report.limited = true;
+            report.integrity = Integrity::Incomplete;
+            report.finding(if expansion { "Archive bomb" } else { "Inspection limit reached" }, "",
+                if expansion { "Extreme expansion was observed while reading; decompression was stopped" }
+                else { "Some data was not fully checked" });
+        } else if error.downcast_ref::<PasswordFailure>().is_some() {
             report.integrity = Integrity::PasswordRequired;
         } else if matches!(
             error.downcast_ref::<sevenz_rust::Error>(),
@@ -439,6 +550,9 @@ pub fn inspect(
             report.finding("Damaged archive", "", error.to_string());
         }
         report.error = Some(format!("{error:#}"));
+        if mode.is_audit() && report.integrity == Integrity::Failed {
+            report.finding("Parser anomaly", "", "Archive metadata or content was rejected by the parser");
+        }
     }
     report
 }
@@ -453,6 +567,15 @@ fn inspect_inner(
     let metadata = std::fs::metadata(&report.path)?;
     let file = archive::open_archive_reader(&report.path)?;
     report.archive_size = file.len();
+    if report.audit.depth > 0 {
+        if file.len() > MAX_NESTED_ARCHIVE_BYTES || file.len() > report.audit.bytes_left {
+            report.limited = true;
+            report.integrity = Integrity::Incomplete;
+            report.finding("Nested audit limit", "", "Nested archive input exceeds the shared audit budget");
+            return Ok(());
+        }
+        report.audit.bytes_left -= file.len();
+    }
     if mode != InspectionMode::Preview {
         report.limited |= !crate::volumes::verify(&report.path, cancel, mode.max_total_bytes())?;
     }
@@ -471,17 +594,28 @@ fn inspect_inner(
         inner: file,
         cancel,
     };
-    let mut header = Vec::with_capacity(512);
-    file.by_ref().take(512).read_to_end(&mut header)?;
+    let mut header = Vec::with_capacity(crate::security::SNIFF_BYTES);
+    file.by_ref().take(crate::security::SNIFF_BYTES as u64).read_to_end(&mut header)?;
     let count = header.len();
     report.detected = resolve_detected_format(detect_format(&header[..count]), report.expected);
     if report.detected.is_none()
         && matches!(report.expected, Some(ResolvedFormat::Tar | ResolvedFormat::Pax))
-        && count == 512
-        && header.iter().all(|byte| *byte == 0)
+        && count >= 512
+        && header[..512].iter().all(|byte| *byte == 0)
         && report.archive_size >= 1024
     {
         report.detected = report.expected;
+    }
+    if report.detected.is_none() && report.expected == Some(ResolvedFormat::Zip) {
+        file.rewind()?;
+        if zip::ZipArchive::new(&mut file).is_ok() { report.detected = Some(ResolvedFormat::Zip); }
+    }
+    if mode.is_audit() {
+        let count = report.archive_size.min(crate::security::SNIFF_BYTES as u64);
+        file.seek(std::io::SeekFrom::End(-(count as i64)))?;
+        let mut tail = Vec::with_capacity(count as usize);
+        file.by_ref().take(count).read_to_end(&mut tail)?;
+        crate::security::content(report, "", &header, &tail);
     }
     report.signature = report
         .detected
@@ -520,7 +654,7 @@ fn inspect_inner(
     file.rewind()?;
     if mode != InspectionMode::Preview && report.archive_size <= mode.max_total_bytes() {
         let mut hash = Sha256::new();
-        let mut buffer = [0_u8; 65536];
+        let mut buffer = vec![0_u8; 65536];
         loop {
             anyhow::ensure!(!cancel.load(Ordering::Relaxed), "Inspection cancelled");
             let count = file.read(&mut buffer)?;
@@ -557,6 +691,9 @@ fn inspect_inner(
                         || (!regular && entry.file_type() != libarchive2::FileType::Directory),
                     error: None,
                 };
+                if mode.is_audit() {
+                    if let Some(target) = entry.hardlink() { crate::security::hard_link(report, &info.name, &target); }
+                }
                 if info.size > mode.max_entry_bytes() || info.size > budget { report.limited = true; }
                 if !report.limited && regular && !info.link {
                     if mode == InspectionMode::Preview { budget -= info.size; }
@@ -601,6 +738,7 @@ fn inspect_inner(
         }
         ResolvedFormat::Zip => {
             let mut archive = zip::ZipArchive::new(file)?;
+            let mut ranges: BTreeMap<u64, u64> = BTreeMap::new();
             report.archive_comment = (!archive.comment().is_empty())
                 .then(|| String::from_utf8_lossy(archive.comment()).into_owned());
             for index in 0..archive.len() {
@@ -609,6 +747,16 @@ fn inspect_inner(
                     break;
                 }
                 let raw = archive.by_index_raw(index)?;
+                let mut range_anomaly = false;
+                if mode.is_audit() {
+                    if let Some(end) = raw.data_start().and_then(|start| start.checked_add(raw.compressed_size())) {
+                        let start = raw.header_start();
+                        range_anomaly = end > raw.central_header_start() || end > report.archive_size || end < start
+                            || ranges.range(..=start).next_back().is_some_and(|(_, previous_end)| *previous_end > start)
+                            || (end > start && ranges.range(start..end).next().is_some());
+                        ranges.insert(start, end);
+                    }
+                }
                 let supported = matches!(
                     raw.compression(),
                     zip::CompressionMethod::Stored | zip::CompressionMethod::Deflated
@@ -638,7 +786,11 @@ fn inspect_inner(
                     error: None,
                 };
                 drop(raw);
-                if mode != InspectionMode::Preview && !info.directory {
+                if range_anomaly {
+                    report.limited = true;
+                    report.finding("Parser anomaly", &info.name, "ZIP entry ranges overlap or point outside the archive data");
+                }
+                if mode != InspectionMode::Preview && !info.directory && !range_anomaly {
                     if !supported {
                         report.limited = true;
                         report.finding("Unsupported compression method", &info.name, &info.method);
@@ -715,7 +867,16 @@ fn inspect_inner(
         | ResolvedFormat::TarLzip
         | ResolvedFormat::TarBrotli => {
             let reader = archive::decode_archive_stream(file, format)?;
-            let mut archive = tar::Archive::new(reader);
+            let decoded_bytes = std::cell::Cell::new(0u64);
+            let before_content = report.audit_bytes_read;
+            let expansion_limit = report.archive_size.saturating_mul(1000).max(10 * 1024 * 1024);
+            let byte_limit = if report.audit.depth > 0 {
+                report.audit.bytes_left.min(MAX_NESTED_ARCHIVE_BYTES)
+            } else { mode.max_total_bytes() };
+            let limit = if mode.is_audit() { expansion_limit.min(byte_limit) } else { u64::MAX };
+            let mut archive = tar::Archive::new(ExpansionReader { inner: reader,
+                bytes: &decoded_bytes, limit, bomb: expansion_limit <= byte_limit,
+                stopped: report.expansion_stopped.clone() });
             for entry in archive.entries()? {
                 if report.entries.len() >= mode.max_entries() {
                     report.limited = true;
@@ -754,6 +915,9 @@ fn inspect_inner(
                     link: header.entry_type().is_symlink() || header.entry_type().is_hard_link(),
                     error: None,
                 };
+                if mode.is_audit() && header.entry_type().is_hard_link() {
+                    if let Some(target) = &info.link_target { crate::security::hard_link(report, &info.name, target); }
+                }
                 if mode != InspectionMode::Preview && header.entry_type().is_file() {
                     let expected_size = info.size;
                     read_entry(
@@ -781,7 +945,7 @@ fn inspect_inner(
             }
             if mode != InspectionMode::Preview && !report.limited {
                 let mut reader = archive.into_inner();
-                let mut buffer = [0_u8; 65536];
+                let mut buffer = vec![0_u8; 65536];
                 loop {
                     anyhow::ensure!(!cancel.load(Ordering::Relaxed), "Inspection cancelled");
                     let count = reader.read(&mut buffer)?;
@@ -794,6 +958,11 @@ fn inspect_inner(
                     }
                     budget -= count as u64;
                 }
+            }
+            if report.audit.depth > 0 {
+                let overhead = decoded_bytes.get().saturating_sub(report.audit_bytes_read.saturating_sub(before_content));
+                if overhead > report.audit.bytes_left { report.limited = true; }
+                report.audit.bytes_left = report.audit.bytes_left.saturating_sub(overhead);
             }
         }
         ResolvedFormat::SevenZip => {
@@ -956,10 +1125,10 @@ fn inspect_inner(
     }
     audit_metadata(report, mode);
     if mode != InspectionMode::Preview && report.integrity != Integrity::PasswordRequired {
-        report.integrity = if report.entries.iter().any(|entry| entry.error.is_some()) {
-            Integrity::Failed
-        } else if report.limited || cancel.load(Ordering::Relaxed) {
+        report.integrity = if report.limited || cancel.load(Ordering::Relaxed) {
             Integrity::Incomplete
+        } else if report.entries.iter().any(|entry| entry.error.is_some()) {
+            Integrity::Failed
         } else {
             Integrity::Passed
         };
@@ -1089,7 +1258,7 @@ fn measure_entry(
     budget: &mut u64,
 ) -> Result<()> {
     let mut total = 0_u64;
-    let mut buffer = [0_u8; 65536];
+    let mut buffer = vec![0_u8; 65536];
     loop {
         anyhow::ensure!(!cancel.load(Ordering::Relaxed), "Inspection cancelled");
         let count = reader.read(&mut buffer)?;
@@ -1118,6 +1287,20 @@ fn read_entry(
     cancel: &AtomicBool,
     budget: &mut u64,
 ) {
+    if mode.is_audit() && info.compressed_size.is_some_and(|packed| {
+        info.size > 10 * 1024 * 1024 && info.size / packed.max(1) > 1000
+    }) {
+        report.limited = true;
+        report.finding("Archive bomb", &info.name, "Extreme expansion ratio; decompression was stopped for safety");
+        return;
+    }
+    if report.audit.depth > 0 && expected_size.is_some_and(|size| {
+        size > MAX_NESTED_ARCHIVE_BYTES || size > report.audit.bytes_left
+    }) {
+        report.limited = true;
+        report.finding("Nested audit limit", &info.name, "Nested entry exceeds the shared audit budget");
+        return;
+    }
     if expected_size.is_some_and(|size| size > mode.max_entry_bytes() || size > *budget) {
         report.limited = true;
         return;
@@ -1127,7 +1310,10 @@ fn read_entry(
         let mut sha = Sha256::new();
         let mut total = 0_u64;
         let mut prefix = Vec::new();
-        let mut buffer = [0_u8; 65536];
+        let mut tail = Vec::new();
+        let mut nested: Option<tempfile::NamedTempFile> = None;
+        let mut nested_seen = false;
+        let mut buffer = vec![0_u8; 65536];
         loop {
             anyhow::ensure!(!cancel.load(Ordering::Relaxed), "Inspection cancelled");
             let count = reader.read(&mut buffer)?;
@@ -1135,15 +1321,71 @@ fn read_entry(
                 break;
             }
             total += count as u64;
+            if mode.is_audit() {
+                report.audit_bytes_read = report.audit_bytes_read.saturating_add(count as u64);
+                let packed = info.compressed_size.unwrap_or(report.archive_size).max(1);
+                if (total > 10 * 1024 * 1024 && total / packed > 1000)
+                    || (report.audit_bytes_read > 100 * 1024 * 1024
+                        && report.audit_bytes_read / report.archive_size.max(1) > 1000)
+                {
+                    report.limited = true;
+                    report.finding("Archive bomb", &info.name, "Extreme expansion was observed while reading; decompression was stopped");
+                    return Err(InspectionLimit.into());
+                }
+            }
             if total > mode.max_entry_bytes() || count as u64 > *budget {
                 report.limited = true;
-                anyhow::bail!("Inspection byte limit reached");
+                return Err(InspectionLimit.into());
             }
             *budget -= count as u64;
+            if report.audit.depth > 0 {
+                if total > MAX_NESTED_ARCHIVE_BYTES || count as u64 > report.audit.bytes_left {
+                    report.limited = true;
+                    return Err(InspectionLimit.into());
+                }
+                report.audit.bytes_left -= count as u64;
+            }
             crc.update(&buffer[..count]);
             sha.update(&buffer[..count]);
-            let keep = (512 - prefix.len()).min(count);
+            let keep = (crate::security::SNIFF_BYTES - prefix.len()).min(count);
             prefix.extend_from_slice(&buffer[..keep]);
+            if mode.is_audit() {
+                if tail.len() + count > crate::security::SNIFF_BYTES {
+                    tail.drain(..tail.len().min(tail.len() + count - crate::security::SNIFF_BYTES));
+                }
+                tail.extend_from_slice(&buffer[..count]);
+                if let Some(output) = nested.as_mut() {
+                    if total <= MAX_NESTED_ARCHIVE_BYTES {
+                        output.write_all(&buffer[..count])?;
+                    } else {
+                        nested = None;
+                        report.limited = true;
+                        report.finding("Nested audit limit", &info.name, "Nested archive exceeds the staging limit");
+                    }
+                } else if !nested_seen && !info.link {
+                    let expected = expected_format(Path::new(&info.name));
+                    if let Some(format) = resolve_detected_format(detect_format(&prefix), expected).or(expected)
+                        .filter(|format| format.capabilities().can_list)
+                    {
+                        nested_seen = true;
+                        report.finding("Nested archive", &info.name, "Entry contains an archive or compressed stream");
+                        if report.audit.options.max_depth > 0 {
+                            if report.audit.depth >= report.audit.options.max_depth || report.audit.archives_left == 0
+                                || expected_size.is_some_and(|size| size > MAX_NESTED_ARCHIVE_BYTES)
+                                || total > prefix.len() as u64 || report.limited
+                            {
+                                report.limited = true;
+                                report.finding("Nested audit limit", &info.name, "Configured depth, archive count, or staging budget was reached");
+                            } else {
+                                let mut output = tempfile::Builder::new().prefix("zarchive-audit-")
+                                    .suffix(&format!(".{}", format.extension())).tempfile()?;
+                                output.write_all(&prefix)?;
+                                nested = Some(output);
+                            }
+                        }
+                    }
+                }
+            }
         }
         info.computed_crc = Some(crc.finalize());
         anyhow::ensure!(
@@ -1157,15 +1399,12 @@ fn read_entry(
         );
         info.sha256 = Some(format!("{:x}", sha.finalize()));
         info.size = total;
+        if info.link && info.link_target.is_none() && total <= 4096 {
+            info.link_target = Some(String::from_utf8_lossy(&prefix).trim_end_matches('\0').to_owned());
+        }
         if mode.is_audit() {
+            crate::security::content(report, &info.name, &prefix, &tail);
             let detected = detect_format(&prefix);
-            if detected.is_some() || expected_format(Path::new(&info.name)).is_some() {
-                report.finding(
-                    "Nested archive",
-                    &info.name,
-                    "Nested archives are reported, not recursively expanded",
-                );
-            }
             if let Some(detected) = detected {
                 if expected_format(Path::new(&info.name)) != Some(detected) {
                     report.finding("Format mismatch", &info.name, detected.label());
@@ -1177,34 +1416,46 @@ fn read_entry(
                     "Entry does not have an archive signature",
                 );
             }
-            let extension = Path::new(&info.name)
-                .extension()
-                .and_then(|value| value.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            let expected = if prefix.starts_with(b"%PDF-") {
-                Some(&["pdf"][..])
-            } else if prefix.starts_with(b"\x89PNG\r\n\x1a\n") {
-                Some(&["png"][..])
-            } else if prefix.starts_with(&[0xff, 0xd8, 0xff]) {
-                Some(&["jpg", "jpeg"][..])
-            } else if prefix.starts_with(b"MZ") {
-                Some(&["exe", "dll", "sys", "scr"][..])
-            } else {
-                None
-            };
-            if expected.is_some_and(|extensions| !extensions.contains(&extension.as_str())) {
-                report.finding(
-                    "Format mismatch",
-                    &info.name,
-                    "Detected content signature does not match the filename",
-                );
+            if let Some(mut nested) = nested {
+                nested.flush()?;
+                audit_nested(report, &info.name, nested.path(), cancel);
             }
         }
         Ok(())
     })();
     if let Err(error) = result {
-        info.error = Some(error.to_string());
+        if error.downcast_ref::<InspectionLimit>().is_none() {
+            info.error = Some(error.to_string());
+        }
+    }
+}
+
+fn audit_nested(report: &mut Report, name: &str, path: &Path, cancel: &AtomicBool) {
+    if cancel.load(Ordering::Relaxed) { report.limited = true; return; }
+    let mut state = report.audit;
+    state.depth += 1;
+    state.archives_left -= 1;
+    let nested = inspect_with_state(path, None, InspectionMode::Audit, cancel, state);
+    report.audit.archives_left = nested.audit.archives_left;
+    report.audit.bytes_left = nested.audit.bytes_left;
+    let entry_path = |entry: &str| if entry.is_empty() { name.to_owned() } else { format!("{name}!{entry}") };
+    if nested.integrity == Integrity::PasswordRequired {
+        report.limited = true;
+        report.finding("Encrypted nested archive", name, "A nested archive requires a password and was not fully inspected");
+    } else if nested.integrity == Integrity::Failed {
+        report.limited = true;
+        report.finding("Parser anomaly", name, "A nested archive could not be fully parsed or verified");
+    }
+    if nested.limited || nested.integrity == Integrity::Incomplete {
+        report.limited = true;
+        report.finding("Nested audit limit", name, "Nested inspection was incomplete");
+    }
+    for finding in nested.findings {
+        report.finding(finding.kind, entry_path(&finding.entry), finding.detail);
+    }
+    for (entry, signature) in nested.content_signatures {
+        if report.content_signatures.len() >= MAX_ENTRIES { report.limited = true; break; }
+        report.content_signatures.insert(entry_path(&entry), signature);
     }
 }
 
@@ -1219,6 +1470,7 @@ fn audit_metadata(report: &mut Report, mode: InspectionMode) {
         if !mode.is_audit() {
             continue;
         }
+        crate::security::metadata(report, &info);
         let normalized = info.name.replace('\\', "/");
         if normalized.starts_with('/')
             || normalized.contains(':')
@@ -1261,6 +1513,9 @@ fn audit_metadata(report: &mut Report, mode: InspectionMode) {
                 }
             }
         }
+    }
+    if mode.is_audit() {
+        crate::security::structure(report);
     }
     if report.limited {
         report.finding(
@@ -1323,6 +1578,210 @@ pub(crate) mod tests {
     }
     use std::io::Write;
 
+    fn empty_zip() -> Vec<u8> {
+        zip::ZipWriter::new(std::io::Cursor::new(Vec::new())).finish().unwrap().into_inner()
+    }
+
+    fn zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, bytes) in entries {
+            writer.start_file(*name, zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn security_audit_nested_archives_fit_platform_worker_stack() {
+        std::thread::Builder::new().name("audit-small-stack".to_owned()).stack_size(512 * 1024)
+            .spawn(|| {
+                let root = tempfile::tempdir().unwrap();
+                let path = root.path().join("nested.zip");
+                let mut bytes = zip_bytes(&[("payload.txt", b"small worker stack regression")]);
+                for index in 0..8 {
+                    bytes = zip_bytes(&[(&format!("level-{index}.zip"), &bytes)]);
+                }
+                std::fs::write(&path, bytes).unwrap();
+                for mode in [InspectionMode::Audit, InspectionMode::FullAudit] {
+                    let report = inspect_with_options(&path, None, mode, &AtomicBool::new(false),
+                        AuditOptions { max_depth: 8 });
+                    assert_eq!(report.integrity, Integrity::Passed, "{:?}", report.error);
+                    assert_eq!(report.json()["nested_audit"]["archives_inspected"], 8);
+                }
+            }).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn security_audit_recursion_respects_depth_and_reports_nested_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let leaf = zip_bytes(&[("invoice.pdf.exe", b"MZ payload"), ("../escape.txt", b"unsafe")]);
+        let middle = zip_bytes(&[("inner.zip", &leaf)]);
+        let path = root.path().join("outer.zip");
+        std::fs::write(&path, zip_bytes(&[("middle.zip", &middle)])).unwrap();
+        for depth in [0, 1, 2] {
+            let report = inspect_with_options(&path, None, InspectionMode::Audit,
+                &AtomicBool::new(false), AuditOptions { max_depth: depth });
+            assert_eq!(report.integrity, if depth == 1 { Integrity::Incomplete } else { Integrity::Passed });
+            assert_eq!(report.json()["nested_audit"]["archives_inspected"], depth);
+            assert_eq!(report.findings.iter().any(|finding| finding.kind == "Double extension"
+                && finding.entry == "middle.zip!inner.zip!invoice.pdf.exe"), depth == 2);
+            if depth == 2 {
+                assert!(report.findings.iter().any(|finding| finding.kind == "Unsafe path"
+                    && finding.entry == "middle.zip!inner.zip!../escape.txt"));
+                assert!(report.json()["content_signatures"].as_object().unwrap().contains_key("middle.zip!inner.zip!invoice.pdf.exe"));
+            }
+        }
+        assert!(!root.path().join("escape.txt").exists());
+    }
+
+    #[test]
+    fn security_audit_marks_encrypted_and_corrupt_nested_archives_incomplete() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("payload.txt");
+        std::fs::write(&source, b"private nested data").unwrap();
+        let nested = root.path().join("protected.zip");
+        archive::create_archive_with_password(&nested, &[source], archive::CreateOptions::default(), Some("nested-password")).unwrap();
+        let encrypted = std::fs::read(nested).unwrap();
+        for (bytes, kind) in [(encrypted.as_slice(), "Encrypted nested archive"), (b"PK\x05\x06\0\0".as_slice(), "Parser anomaly")] {
+            let path = root.path().join("outer.zip");
+            std::fs::write(&path, zip_bytes(&[("inner.zip", bytes)])).unwrap();
+            let report = inspect(&path, None, InspectionMode::Audit, &AtomicBool::new(false));
+            assert_eq!(report.integrity, Integrity::Incomplete);
+            assert!(report.findings.iter().any(|finding| finding.kind == kind), "{kind}");
+            assert!(!report.json().to_string().contains("nested-password"));
+            assert_eq!(inspect(&path, None, InspectionMode::Integrity, &AtomicBool::new(false)).integrity, Integrity::Passed);
+        }
+    }
+
+    #[test]
+    fn security_audit_limits_archive_counts_and_shared_nested_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("outer.zip");
+        let empty = empty_zip();
+        let names = (0..=MAX_NESTED_ARCHIVES).map(|index| format!("nested-{index}.zip")).collect::<Vec<_>>();
+        let entries = names.iter().map(|name| (name.as_str(), empty.as_slice())).collect::<Vec<_>>();
+        std::fs::write(&path, zip_bytes(&entries)).unwrap();
+        let report = inspect(&path, None, InspectionMode::FullAudit, &AtomicBool::new(false));
+        assert_eq!(report.integrity, Integrity::Incomplete);
+        assert_eq!(report.json()["nested_audit"]["archives_inspected"], MAX_NESTED_ARCHIVES);
+        assert!(report.findings.iter().any(|finding| finding.kind == "Nested audit limit"));
+        let mut state = AuditState::new(AuditOptions::default());
+        state.depth = 1;
+        state.bytes_left = 1;
+        let report = inspect_with_state(&path, None, InspectionMode::Audit, &AtomicBool::new(false), state);
+        assert_eq!(report.integrity, Integrity::Incomplete);
+    }
+
+    #[test]
+    fn security_audit_stops_zip_and_stream_expansion_bombs() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("bomb.zip");
+        let mut writer = zip::ZipWriter::new(File::create(&path).unwrap());
+        writer.start_file("zeros.txt", zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated).compression_level(Some(9))).unwrap();
+        let block = [0u8; 65536];
+        for _ in 0..192 { writer.write_all(&block).unwrap(); }
+        writer.finish().unwrap();
+        let stream = root.path().join("bomb.gz");
+        let mut writer = flate2::write::GzEncoder::new(File::create(&stream).unwrap(), flate2::Compression::best());
+        for _ in 0..192 { writer.write_all(&block).unwrap(); }
+        writer.finish().unwrap();
+        let tar_stream = root.path().join("bomb.tar.gz");
+        let writer = flate2::write::GzEncoder::new(File::create(&tar_stream).unwrap(), flate2::Compression::best());
+        let mut builder = tar::Builder::new(writer);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_link_name("inside").unwrap();
+        header.set_size(12 * 1024 * 1024);
+        header.set_mode(0o777);
+        header.set_cksum();
+        builder.append_data(&mut header, "skip-link", std::io::repeat(0).take(12 * 1024 * 1024)).unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+        for path in [&path, &stream, &tar_stream] {
+            for mode in [InspectionMode::Audit, InspectionMode::FullAudit] {
+                let report = inspect(path, None, mode, &AtomicBool::new(false));
+                assert_eq!(report.integrity, Integrity::Incomplete);
+                assert!(report.findings.iter().any(|finding| finding.kind == "Archive bomb"));
+                assert!(!report.findings.iter().any(|finding| finding.kind == "Damaged entry"));
+            }
+        }
+    }
+
+    #[test]
+    fn security_audit_detects_zip_symlinks_ads_and_polyglot_containers() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("links.zip");
+        let mut writer = zip::ZipWriter::new(File::create(&path).unwrap());
+        writer.add_symlink("unsafe-link", "../../outside", zip::write::SimpleFileOptions::default()).unwrap();
+        writer.start_file("notes.txt:hidden.exe", zip::write::SimpleFileOptions::default()).unwrap();
+        writer.write_all(b"ADS contents").unwrap();
+        writer.finish().unwrap();
+        let report = inspect(&path, None, InspectionMode::Audit, &AtomicBool::new(false));
+        assert!(report.findings.iter().any(|finding| finding.kind == "Suspicious link"));
+        assert!(report.findings.iter().any(|finding| finding.kind == "Alternate data stream"));
+        assert_eq!(report.entries[0].link_target.as_deref(), Some("../../outside"));
+        let polyglot = root.path().join("polyglot.zip");
+        let mut bytes = b"GIF89a".to_vec();
+        bytes.extend_from_slice(&zip_bytes(&[("payload.txt", b"plain payload")]));
+        std::fs::write(&polyglot, bytes).unwrap();
+        let report = inspect(&polyglot, None, InspectionMode::Audit, &AtomicBool::new(false));
+        assert_eq!(report.integrity, Integrity::Passed, "{:?}", report.error);
+        assert!(report.findings.iter().any(|finding| finding.kind == "Polyglot file"));
+        assert!(!root.path().join("outside").exists());
+    }
+
+    #[test]
+    fn security_audit_detects_hardlinks_and_link_cycles() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("links.tar");
+        let mut builder = tar::Builder::new(File::create(&path).unwrap());
+        for (name, target, kind) in [("dir/hard", "../outside", tar::EntryType::Link),
+            ("first", "second", tar::EntryType::Symlink), ("second", "first", tar::EntryType::Symlink)] {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(kind);
+            header.set_size(0);
+            header.set_mode(0o777);
+            header.set_cksum();
+            builder.append_link(&mut header, name, target).unwrap();
+        }
+        builder.finish().unwrap();
+        let report = inspect(&path, None, InspectionMode::Audit, &AtomicBool::new(false));
+        assert_eq!(report.integrity, Integrity::Passed);
+        assert!(report.findings.iter().any(|finding| finding.kind == "Suspicious link" && finding.entry == "dir/hard"));
+        assert!(report.findings.iter().any(|finding| finding.kind == "Suspicious link" && finding.detail.contains("cycle")));
+    }
+
+    #[test]
+    fn security_audit_detects_aliased_zip_ranges() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("overlap.zip");
+        let mut bytes = zip_bytes(&[("first.txt", b"same"), ("second.txt", b"same")]);
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+        let first = archive.by_index_raw(0).unwrap().header_start();
+        let second = archive.by_index_raw(1).unwrap().central_header_start() as usize;
+        drop(archive);
+        bytes[second + 42..second + 46].copy_from_slice(&(first as u32).to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        let report = inspect(&path, None, InspectionMode::Audit, &AtomicBool::new(false));
+        assert!(report.findings.iter().any(|finding| finding.kind == "Parser anomaly"));
+        assert_ne!(report.integrity, Integrity::Passed);
+    }
+
+    #[test]
+    fn security_audit_accepts_ordinary_images_and_records_magic_types() {
+        let root = tempfile::tempdir().unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(1, 1).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let path = root.path().join("ordinary.zip");
+        std::fs::write(&path, zip_bytes(&[("photo.png", png.get_ref()), ("notes.txt", b"ordinary text")])).unwrap();
+        let report = inspect(&path, None, InspectionMode::Audit, &AtomicBool::new(false));
+        assert_eq!(report.integrity, Integrity::Passed);
+        assert_eq!(report.json()["content_signatures"]["photo.png"], "image/png");
+        assert!(!report.findings.iter().any(|finding| matches!(finding.kind,
+            "Polyglot file" | "Suspicious executable" | "Format mismatch" | "Parser anomaly")));
+    }
+
     #[test]
     /// Stops stream reads and seeks as soon as cancellation is requested.
     fn cancelled_reader_stops_stream_reads_and_seeks() {
@@ -1346,11 +1805,12 @@ pub(crate) mod tests {
         let mut zip = zip::ZipWriter::new(File::create(&path).unwrap());
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored);
+        let nested = empty_zip();
         for (name, bytes) in [
             ("first.txt", b"duplicate".as_slice()),
             ("second.txt", b"duplicate"),
             ("FIRST.TXT", b"other"),
-            ("nested.zip", b"PK\x05\x06\0\0"),
+            ("nested.zip", nested.as_slice()),
             ("image.txt", b"\x89PNG\r\n\x1a\n"),
             ("../escape.txt", b"unsafe"),
         ] {
@@ -1467,13 +1927,14 @@ pub(crate) mod tests {
         let mut zip = zip::ZipWriter::new(File::create(path).unwrap());
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored);
+        let nested = empty_zip();
         for (name, contents) in [
             ("README.txt", b"Audit findings sample".as_slice()),
             ("copies/first.txt", b"duplicate payload"),
             ("copies/second.txt", b"duplicate payload"),
             ("SAME.txt", b"first name"),
             ("same.TXT", b"second name"),
-            ("nested.zip", b"PK\x05\x06\0\0"),
+            ("nested.zip", nested.as_slice()),
             ("image.txt", b"\x89PNG\r\n\x1a\n"),
             ("../escape.txt", b"unsafe path"),
         ] {
@@ -1581,6 +2042,106 @@ pub(crate) mod tests {
 
         assert!(damaged.exists());
         assert!(audit.exists());
+    }
+
+    fn store_security_example(path: &Path, bytes: &[u8]) {
+        if path.exists() { return; }
+        let mut staged = tempfile::NamedTempFile::new_in(path.parent().unwrap()).unwrap();
+        staged.write_all(bytes).unwrap();
+        staged.persist_noclobber(path).unwrap();
+    }
+
+    fn security_examples(directory: &Path) -> Vec<Report> {
+        std::fs::create_dir_all(directory).unwrap();
+        let mut image = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(1, 1).write_to(&mut image, image::ImageFormat::Png).unwrap();
+        let leaf = zip_bytes(&[("nested-note.pdf.exe", b"Harmless text fixture, not an executable.")]);
+        let nested = zip_bytes(&[("level-two.zip", &leaf)]);
+        let mut polyglot = b"GIF89a".to_vec();
+        polyglot.extend_from_slice(&zip_bytes(&[("embedded.txt", b"Harmless embedded ZIP content.")]));
+        let mut links = tar::Builder::new(Vec::new());
+        for (name, target, kind) in [
+            ("outside-symlink", "../../outside", tar::EntryType::Symlink),
+            ("dir/outside-hardlink", "../outside", tar::EntryType::Link),
+            ("cycle-a", "cycle-b", tar::EntryType::Symlink),
+            ("cycle-b", "cycle-a", tar::EntryType::Symlink),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(kind);
+            header.set_size(0);
+            header.set_mode(0o777);
+            header.set_cksum();
+            links.append_link(&mut header, name, target).unwrap();
+        }
+        let links = links.into_inner().unwrap();
+        let main = directory.join("35-security-audit.zip");
+        store_security_example(&main, &zip_bytes(&[
+            ("README.txt", b"Harmless audit fixtures. Run Audit archive, not extraction. Executable names contain text only; links exist only in the TAR metadata. Expected: executable, double-extension, ADS, signature mismatch, polyglot, link and structure warnings. Use nested audit depth 2 to inspect both ZIP levels."),
+            ("documents/invoice.pdf.exe", b"Harmless text fixture. No executable code."),
+            ("signatures/image.txt", image.get_ref()),
+            ("polyglot/image-with-zip.gif", &polyglot),
+            ("streams/notes.txt:review.txt", b"Harmless NTFS ADS filename fixture."),
+            ("structures/CON.txt", b"Reserved Windows filename fixture."),
+            ("structures/conflict", b"A regular file used as a parent path."),
+            ("structures/conflict/child.txt", b"File/directory collision fixture."),
+            ("links/suspicious-links.tar", &links),
+            ("nested/level-one.zip", &nested),
+        ]));
+        let expansion = directory.join("36-bounded-expansion.zip");
+        if !expansion.exists() {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            writer.start_file("zeros.txt", zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated).compression_level(Some(9))).unwrap();
+            let block = [0u8; 65536];
+            for _ in 0..192 { writer.write_all(&block).unwrap(); }
+            store_security_example(&expansion, &writer.finish().unwrap().into_inner());
+        }
+        let parser = directory.join("37-parser-anomaly.zip");
+        let mut bytes = zip_bytes(&[("first.txt", b"same"), ("second.txt", b"same")]);
+        let mut reader = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+        let first = reader.by_index_raw(0).unwrap().header_start();
+        let second = reader.by_index_raw(1).unwrap().central_header_start() as usize;
+        drop(reader);
+        bytes[second + 42..second + 46].copy_from_slice(&(first as u32).to_le_bytes());
+        store_security_example(&parser, &bytes);
+
+        let cancel = AtomicBool::new(false);
+        let reports = [&main, &expansion, &parser].map(|path| inspect_with_options(
+            path, None, InspectionMode::Audit, &cancel, AuditOptions { max_depth: 2 }));
+        assert_eq!(reports[0].integrity, Integrity::Passed, "{:?}", reports[0].error);
+        for kind in ["Suspicious executable", "Double extension", "Alternate data stream",
+            "Polyglot file", "Format mismatch", "Suspicious link", "Suspicious structure", "Nested archive"] {
+            assert!(reports[0].findings.iter().any(|finding| finding.kind == kind), "missing {kind}");
+        }
+        assert!(reports[0].findings.iter().any(|finding| finding.entry ==
+            "nested/level-one.zip!level-two.zip!nested-note.pdf.exe" && finding.kind == "Double extension"));
+        assert_eq!(reports[1].integrity, Integrity::Incomplete);
+        assert!(reports[1].findings.iter().any(|finding| finding.kind == "Archive bomb"));
+        assert_ne!(reports[2].integrity, Integrity::Passed);
+        assert!(reports[2].findings.iter().any(|finding| finding.kind == "Parser anomaly"));
+        reports.into_iter().collect()
+    }
+
+    #[test]
+    fn security_examples_trigger_expected_findings_without_local_samples() {
+        let root = tempfile::tempdir().unwrap();
+        let reports = security_examples(root.path());
+        assert_eq!(reports.len(), 3);
+        assert!(!root.path().join("outside").exists());
+        let original = std::fs::read(&reports[0].path).unwrap();
+        security_examples(root.path());
+        assert_eq!(std::fs::read(&reports[0].path).unwrap(), original);
+    }
+
+    #[test]
+    #[ignore = "generates harmless manual security-audit examples"]
+    fn generate_security_audit_samples() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("samples");
+        for report in security_examples(&directory) {
+            println!("{}: {:?}", report.path.display(), report.integrity);
+            let kinds = report.findings.iter().map(|finding| finding.kind).collect::<BTreeSet<_>>();
+            println!("  Findings: {}", kinds.into_iter().collect::<Vec<_>>().join(", "));
+        }
     }
 
     #[test]
