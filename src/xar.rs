@@ -38,6 +38,23 @@ impl std::fmt::Display for ReadError {
 
 impl std::error::Error for ReadError {}
 
+#[derive(Debug)]
+pub(crate) enum EntryError {
+    Size,
+    Checksum,
+}
+
+impl std::fmt::Display for EntryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Size => "XAR entry size mismatch",
+            Self::Checksum => "XAR entry checksum mismatch",
+        })
+    }
+}
+
+impl std::error::Error for EntryError {}
+
 pub(crate) struct XarReader<R> {
     reader: R,
     pub(crate) entries: Vec<xara::XarFile>,
@@ -46,6 +63,66 @@ pub(crate) struct XarReader<R> {
 }
 
 impl<R: Read + Seek> XarReader<R> {
+    pub(crate) fn for_recovery(mut reader: R) -> Result<(Self, bool)> {
+        const LIMIT: u64 = 16 * 1024 * 1024;
+        let archive_size = reader.seek(SeekFrom::End(0))?;
+        reader.rewind()?;
+        let mut bytes = [0u8; 28];
+        reader.read_exact(&mut bytes)?;
+        let declared_offset = u16::from_be_bytes(bytes[4..6].try_into().unwrap()) as u64;
+        for offset in [declared_offset, 28] {
+            if !(28..=4096).contains(&offset) || offset >= archive_size {
+                continue;
+            }
+            reader.seek(SeekFrom::Start(offset))?;
+            let mut decoder = flate2::read::ZlibDecoder::new(reader.by_ref().take(LIMIT));
+            let mut xml = Vec::new();
+            let result = decoder.by_ref().take(LIMIT + 1).read_to_end(&mut xml);
+            if xml.len() as u64 > LIMIT || (result.is_err() && decoder.total_in() >= LIMIT) {
+                return Err(ReadError::Limit.into());
+            }
+            if result.is_err() {
+                continue;
+            }
+            let compressed = decoder.total_in();
+            drop(decoder);
+            let xml_length = xml.len() as u64;
+            drop(xml);
+            let header = xara::header::XarHeader {
+                magic: xara::header::XAR_MAGIC,
+                header_size: offset as u16,
+                version: 1,
+                toc_compressed_len: compressed,
+                toc_uncompressed_len: xml_length,
+                checksum_algo: xara::header::ChecksumAlgo::None,
+            };
+            reader.seek(SeekFrom::Start(offset))?;
+            let (entries, _) = match xara::toc::parse_toc(&mut reader, &header) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            let heap_offset = offset
+                .checked_add(compressed)
+                .context("Invalid XAR heap offset")?;
+            anyhow::ensure!(heap_offset <= archive_size, "Invalid XAR heap offset");
+            let repaired = bytes[..4] != xara::header::XAR_MAGIC.to_be_bytes()
+                || offset != declared_offset
+                || u16::from_be_bytes(bytes[6..8].try_into().unwrap()) != 1
+                || compressed != u64::from_be_bytes(bytes[8..16].try_into().unwrap())
+                || xml_length != u64::from_be_bytes(bytes[16..24].try_into().unwrap());
+            return Ok((
+                Self {
+                    reader,
+                    entries,
+                    heap_offset,
+                    archive_size,
+                },
+                repaired,
+            ));
+        }
+        anyhow::bail!("XAR contents table could not be reconstructed");
+    }
+
     pub(crate) fn new(mut reader: R) -> Result<Self> {
         let archive_size = reader.seek(SeekFrom::End(0))?;
         reader.rewind()?;
@@ -70,6 +147,26 @@ impl<R: Read + Seek> XarReader<R> {
     }
 
     pub(crate) fn entry_reader(&mut self, entry: &xara::XarFile) -> Result<XarEntryReader<'_>> {
+        self.entry_reader_inner(entry, false)
+    }
+
+    pub(crate) fn recovery_entry_reader(
+        &mut self,
+        entry: &xara::XarFile,
+    ) -> Result<XarEntryReader<'_>> {
+        self.entry_reader_inner(entry, true)
+    }
+
+    pub(crate) fn entry_range(&self, entry: &xara::XarFile) -> Option<(u64, u64)> {
+        let data = entry.data.as_ref()?;
+        Some((self.heap_offset.checked_add(data.offset)?, data.length))
+    }
+
+    fn entry_reader_inner(
+        &mut self,
+        entry: &xara::XarFile,
+        partial: bool,
+    ) -> Result<XarEntryReader<'_>> {
         anyhow::ensure!(
             entry.file_type == xara::XarFileType::File,
             "Only regular files are opened"
@@ -81,6 +178,7 @@ impl<R: Read + Seek> XarReader<R> {
                 read: 0,
                 checksum: None,
                 finished: false,
+                recovering: partial,
             });
         };
         let offset = self
@@ -88,13 +186,18 @@ impl<R: Read + Seek> XarReader<R> {
             .checked_add(data.offset)
             .context("Invalid XAR data offset")?;
         anyhow::ensure!(
-            offset
-                .checked_add(data.length)
-                .is_some_and(|end| end <= self.archive_size),
+            offset <= self.archive_size
+                && (partial
+                    || offset
+                        .checked_add(data.length)
+                        .is_some_and(|end| end <= self.archive_size)),
             "XAR entry exceeds the archive size"
         );
         self.reader.seek(SeekFrom::Start(offset))?;
-        let compressed = self.reader.by_ref().take(data.length);
+        let compressed = self
+            .reader
+            .by_ref()
+            .take(data.length.min(self.archive_size - offset));
         let reader: Box<dyn Read + '_> = match data.encoding.as_str() {
             "application/octet-stream" => Box::new(compressed),
             "application/x-gzip" | "application/zlib" | "application/x-zlib" => {
@@ -128,6 +231,7 @@ impl<R: Read + Seek> XarReader<R> {
             read: 0,
             checksum,
             finished: false,
+            recovering: partial,
         })
     }
 }
@@ -138,6 +242,7 @@ pub(crate) struct XarEntryReader<'a> {
     read: u64,
     checksum: Option<(Box<dyn DynDigest>, String)>,
     finished: bool,
+    recovering: bool,
 }
 
 impl Read for XarEntryReader<'_> {
@@ -150,8 +255,10 @@ impl Read for XarEntryReader<'_> {
             .read
             .checked_add(count as u64)
             .ok_or_else(|| io::Error::other("XAR entry size overflow"))?;
-        if self.read > self.expected_size || (count == 0 && self.read != self.expected_size) {
-            return Err(io::Error::other("XAR entry size mismatch"));
+        if (!self.recovering && self.read > self.expected_size)
+            || (count == 0 && self.read != self.expected_size)
+        {
+            return Err(io::Error::other(EntryError::Size));
         }
         if let Some((digest, expected)) = &mut self.checksum {
             digest.update(&buffer[..count]);
@@ -162,7 +269,7 @@ impl Read for XarEntryReader<'_> {
                     .map(|byte| format!("{byte:02x}"))
                     .collect::<String>();
                 if actual != *expected {
-                    return Err(io::Error::other("XAR entry checksum mismatch"));
+                    return Err(io::Error::other(EntryError::Checksum));
                 }
             }
         }

@@ -11,6 +11,31 @@ use std::{
 const MAX_VOLUMES: usize = 10_000;
 const MAX_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 
+pub(crate) struct RecoveryVolume {
+    pub path: Option<PathBuf>,
+    pub size: u64,
+}
+
+pub(crate) fn recovery_layout(path: &Path) -> io::Result<(Vec<RecoveryVolume>, bool)> {
+    let Some(base) = numbered_base(path) else {
+        return Ok((vec![RecoveryVolume { path: Some(path.to_owned()), size: path.metadata()?.len() }], false));
+    };
+    let parts = discover_parts(&base)?;
+    let manifest = read_manifest(&base).ok().flatten();
+    let inferred_size = parts.values().map(|path| path.metadata().map(|metadata| metadata.len()))
+        .collect::<io::Result<Vec<_>>>()?.into_iter().max().unwrap_or(0);
+    let count = parts.keys().last().copied().unwrap_or(0).max(manifest.as_ref().map_or(0, |manifest| manifest.sizes.len()));
+    if count == 0 || count > MAX_VOLUMES { return Err(invalid_manifest()); }
+    let mut volumes = Vec::new();
+    for index in 1..=count {
+        let part = parts.get(&index).cloned();
+        let size = manifest.as_ref().and_then(|manifest| manifest.sizes.get(index - 1)).copied()
+            .unwrap_or_else(|| if index == count { part.as_ref().and_then(|path| path.metadata().ok()).map_or(inferred_size, |metadata| metadata.len()) } else { inferred_size });
+        volumes.push(RecoveryVolume { path: part, size });
+    }
+    Ok((volumes, manifest.is_none()))
+}
+
 pub(crate) fn part_path(base: &Path, index: usize) -> PathBuf {
     let mut name = base.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".{index:03}"));

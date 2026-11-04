@@ -81,6 +81,11 @@ available while your files are processed.
   deletion of the last entry. Empty XAR archives remain readable by system tools.
 - **Verify integrity.** Read archive data in the background, validate available
   checksums, and calculate CRC32 and SHA-256 during a full integrity check.
+- **Repair and recover.** Use **Inspect > Archive Repair & Recovery** to recover
+  readable entries into private staging, review partial and unverified files,
+  and save a new ZIP plus its JSON recovery report without modifying the source.
+  **Salvage Mode** scans preserved headers and possible PNG/JPEG/PDF signatures
+  even when the archive directory cannot be read.
 - **Audit individual archives or batches.** Identify suspicious paths, duplicate
   content, archive bombs, possible polyglot files, executable content, NTFS
   alternate data streams, unsafe links, and mismatches between signatures and
@@ -117,6 +122,34 @@ available while your files are processed.
   color, one of six interface languages, and a default startup folder. Folder
   sizes are calculated automatically by default, with an option to turn that
   background work off.
+
+## Architecture
+
+The crate is organized by application responsibility while retaining stable
+facade modules for existing call sites:
+
+- `main.rs` owns application state and startup; `app/view.rs` renders the main
+  window. Feature workflows remain in focused modules such as `creation.rs`,
+  `operations.rs`, `password.rs`, and `recovery.rs`.
+- `archive.rs` is the archive service facade. `archive/format.rs` owns format
+  metadata and capabilities; `archive/read.rs`, `archive/write.rs`, and
+  `archive/extract.rs` own opening/listing, creation/mutation, and safe
+  extraction respectively.
+- `inspection.rs` runs metadata, integrity, and audit work, with shared result
+  types in `inspection/model.rs`. `inspector.rs` coordinates the inspection UI;
+  `inspector/comparison.rs` and `inspector/panes.rs` own comparison and
+  virtualized report panels.
+- `text_preview.rs` owns preview state and rendering, while
+  `text_preview/loader.rs` handles bounded reads, decoding, and tabular data.
+- `recovery.rs` owns the shared recovery report and export model;
+  `recovery/engine.rs` routes work to format backends. `parity.rs` and its
+  submodules provide parity reconstruction and creation.
+- `task_queue.rs` is the shared boundary for cancellable background work and
+  progress reporting. UI modules enqueue work; archive and inspection services
+  cooperate through its checkpoints and readers.
+
+When extending a subsystem, put its format-specific or view-specific logic in
+that subsystem's folder and keep the facade focused on shared types and routing.
 
 ## Supported Formats
 
@@ -183,12 +216,25 @@ checksum, subject to the normal inspection limits; an incomplete verification
 is not reported as passed. Without a manifest, external numbered archives remain
 readable and are verified through the archive format's existing integrity checks.
 
+Enable **Create PAR2 recovery files** in the creation dialog to protect the
+completed archive. Choose 5%, 10%, 20%, 30%, or 50% recovery data. PAR2 creation
+uses the native `par2-rs` engine and needs no separate executable. A single
+archive produces a sidecar such as `backup.zip.par2`; split archives protect
+each numbered part in the set. The volume manifest is not included because the
+archive parts are the recovery inputs. The encoder has a 512 MiB working-memory
+budget. PAR2 outputs are staged and published
+without overwriting existing files. If PAR2 creation is cancelled or fails,
+the already-created archive remains available and the status message reports
+that the recovery files were not completed.
+
 Volume support is a separate format capability: ZIP, 7z, and TAR creation use
 numbered byte streams, not a native multi-disk ZIP implementation. Native RAR
 volumes are readable, but volume creation through the external RAR tool is not
 enabled. Other formats retain numbered-volume reading without offering volume
-creation. Native split ZIP sets using `.z01`, `.z02`, and a final `.zip` remain
-unsupported. A set is limited to 10,000 parts.
+creation. Native split ZIP sets using `.z01`, `.z02`, and a final `.zip` are
+supported by **Archive Repair & Recovery**, not normal browsing or mutation.
+Numbered streams are limited to 10,000 parts; native split ZIP recovery accepts
+up to 128 disks within its staging limits.
 
 Existing multipart archives remain read-only: adding, replacing, and removing
 entries are disabled.
@@ -326,6 +372,240 @@ Links and unusual filenames exist only as archive entries; the generator does
 not create external files or actual filesystem links. Existing samples are
 verified, not overwritten. The sample directory is ignored by Git; the generator
 and its regression test are part of the repository.
+
+### Archive Repair & Recovery
+
+Open **Inspect > Archive Repair & Recovery** for the selected file or open
+archive. Use **Choose archive...** for an unreadable file that cannot be browsed
+normally. An optional password is kept only in the secret input and the running
+job. Enable **Salvage Mode**, then choose **Recover files**. Recovery and export
+run in the background queue; closing the dialog cancels pending work and releases
+its private temporary files.
+
+- **ZIP:** Stored and Deflated entries are recovered independently, using
+  preserved central metadata or local headers. A missing central directory is
+  reconstructed when the recovered entries are saved to a new ZIP. CRC and size
+  matches are required for a verified recovery. Damaged stored bytes and readable
+  prefixes of damaged entries are retained separately as partial data. Encrypted
+  entries require the password and are conservatively labeled unverified.
+- **TAR:** Recovery scans aligned 512-byte blocks in plain TAR/PAX archives,
+  recognizes V7, USTAR, and GNU headers, reconstructs damaged header checksums,
+  and resynchronizes after destroyed headers or missing blocks. Preserved GNU
+  long-name records are supported. Truncated file payloads are kept as partial
+  data. Choose **Export** to build a new TAR in the source format with correct
+  headers, padding, end markers, and an embedded recovery report. Original names
+  remain in the report while exported files use safe generated names. Missing
+  header names or invalid size fields cannot be
+  reconstructed reliably, and damaged PAX/GNU sparse metadata can prevent full
+  recovery. TAR has no per-file CRC, so header repair does not verify its content.
+- **CPIO:** ODC, `newc`, and CRC ASCII record headers are resynchronized after a
+  destroyed record. Names and lengths are bounded before the native parser is
+  called. The CRC variant's additive content checksum is verified when present;
+  other variants remain unverified. Missing names or lengths cannot be invented.
+- **AR:** Preserved member headers can be read after a destroyed global or member
+  header. GNU filename tables and BSD long-name members are supported. If the GNU
+  filename table is missing, a generated name is recorded instead of claiming the
+  original name was recovered. AR has no per-member content checksum.
+- **XAR:** Entries are recovered independently, retaining later files after an
+  earlier entry fails. A valid bounded zlib/XML contents table can reconstruct
+  incorrect header lengths, magic, or version fields. Truncated entry data and
+  incorrect declared sizes retain available bytes as partial output. Known
+  extracted checksums are verified; absent checksums remain unverified. A lost
+  or unreadable contents table cannot reliably recover filenames and heap ranges.
+- **7z:** Recovery decodes independent compression blocks separately, so a failed
+  block does not discard verified files from other blocks. Per-file CRCs are
+  checked when available. Files dependent on a broken solid stream are reported
+  separately; changing a checksum does not reconstruct missing compressed bytes.
+  A damaged start-header CRC can be reconstructed in memory only when the
+  referenced next header is intact and its CRC verifies. Destroyed end metadata
+  or encrypted headers without the correct password can still prevent recovery.
+  Header reads and dictionary sizes retain their safety limits.
+- **RAR:** A native UnRAR data callback retains readable bytes without creating
+  archive-supplied paths or links, validates through the native decoder and CRC
+  where available, and attempts later entries after a damaged file. Original RAR
+  volume naming is handled by the reader; missing volumes and password errors
+  are reported explicitly. Solid dependencies may prevent later files from
+  decoding. Optional parity reconstruction uses RAR recovery records or matching
+  `.rev` recovery volumes on a private copy before normal file recovery. The
+  original RAR and its volumes are never rewritten.
+- **Compressed TAR and standalone streams:** GZIP, BZIP2, XZ, Zstandard, LZ4,
+  LZIP, and Brotli are decoded into bounded private staging. Available decoded
+  TAR records then use the TAR repair path, even if a damaged footer prevents
+  complete wrapper validation. Standalone streams retain their readable payload.
+  Diagnostics distinguish compressed input from offsets in the decoded stream.
+  Damage to a compression dictionary or an early block can still make later
+  compressed bytes undecodable.
+- **Other variants:** The native reader remains a fallback for variants without
+  a dedicated resynchronizer. Unsupported methods, encrypted metadata, and
+  damaged streams can prevent further recovery.
+- **Missing numbered volumes:** Existing `.001` parts are used without collapsing
+  gaps. A companion volume manifest supplies expected positions and sizes; without
+  it, positions are inferred from available part sizes and may be uncertain.
+  Entries wholly in readable ranges may survive while entries crossing a missing
+  range are partial or unavailable. Matching PAR2 recovery data can reconstruct
+  protected volume files before archive reading. Without sufficient valid parity,
+  missing bytes are never zero-filled or invented.
+- **Signature carving:** Salvage Mode recognizes possible PNG, JPEG, and PDF data
+  inside unreadable bytes. File endings are heuristic: results are labeled
+  **Signature candidate (unverified)**, not guaranteed complete files.
+
+The result list distinguishes **Recovered**, **Recovered (unverified)**,
+**Partially recovered**, **Not recovered**, and **Skipped**, with suspect source
+ranges and diagnostic notes. Each failed or uncertain entry includes its reason
+and a suggested next step. Where known, the UI and JSON report show the expected
+and recovered size, expected and actual CRC32, and compressed source range.
+Unknown offsets are not presented as measured locations. Errors distinguish
+missing headers, truncated data, failed checksums, missing volumes, passwords,
+unsupported compression, damaged solid dependencies, and safety limits. For
+encrypted data, an unsuccessful decode can mean either a wrong password or
+corruption; the report does not pretend to distinguish them without evidence.
+**Not recovered** describes this attempt; it does
+not prove that specialist tools could never recover the file. Unreadable regions
+can contain entries whose names and existence cannot be reconstructed.
+
+The single **Export** action writes recovered entries using the original
+archive format's writer, with generated safe names under `recovered/`,
+`unverified/`, `partial/`, and `carved/`, and embeds `recovery-report.json`.
+This keeps the export in the source format rather than asking you to choose an
+unrelated ZIP or TAR. The report retains original names and output mappings.
+Exports never overwrite existing files. Recovered archives are **not encrypted**,
+even when the source was encrypted; recovered data is never executed or opened
+automatically. Directories and filesystem links are not recreated. RAR export
+requires the existing external RAR writer. AR export flattens generated paths,
+with the exact mapping in the embedded report. New headers and checksums describe
+the recovered bytes; they do not prove partial data matches the original.
+
+Recovery is bounded to 10,000 entries, 128 MiB per output file, 1 GiB of total
+staged output, 4 GiB of aggregate input reads, 512 MiB of raw signature scanning,
+20,000 signature candidates, and 16 MiB per carved candidate. Oversized or ZIP64
+directories fall back to local-header scanning instead of unbounded metadata
+allocation. Cancellation and limits can leave additional recoverable data
+unchecked. Recovery is best effort, not a parser sandbox or a guarantee of repair.
+Compressed staging shares the input and scan budgets and stops at 512 MiB or an
+extreme expansion ratio. XAR contents-table reconstruction retains a 16 MiB cap.
+Native multi-disk ZIP and PAR2 reconstruction are described below. No format can
+be completely reconstructed without enough surviving information or valid parity data.
+
+#### Recovery Engine
+
+Recovery separates the UI, shared result/export model, bounded seekable sources,
+and orchestration from ZIP, RAR, 7z, TAR, native-container, structured-format, and
+signature-salvage backends. Reconstruction prepares private copies before normal
+entry verification; it does not bypass shared output limits or promote an entry
+solely because an external program returned success.
+
+#### PAR2 Reconstruction
+
+Select a `.par2` file in **Archive Repair & Recovery**, or select a protected file
+with an adjacent `filename.par2` or `basename.par2` sidecar. Reconstruction is
+selected by default for a PAR2 source. Keep all matching `.volNN+NN.par2` volumes
+and surviving protected files in the same folder.
+
+PAR2 uses the native `rust-par2` Reed-Solomon engine; no external PAR2 executable
+is required. Metadata is combined across volumes, including recovery-only
+volumes, while conflicting sets or file descriptions are rejected. Only blocks
+matching their slice checksums are fed to the solver. Each protected file must
+match its full-file MD5 before it is exported as **Recovered**. This detects
+accidental corruption, not authenticity. A reconstructed archive can then be
+read by the regular recovery backends. Verified protected files are also kept
+as exportable entries, rather than discarded when they are not archives.
+
+The initial implementation supports flat filenames only: directory paths,
+traversal, drive/stream names, reserved names, symlinks, and name collisions are
+rejected before protected-file access. Limits include 128 protected files,
+128 parity volumes, 1 GiB combined input, 16 MiB unique metadata, 8 MiB slices,
+8,192 source blocks, at most 256 missing blocks, and a 128 MiB repair-buffer
+budget. Operations check cooperative cancellation and a 120-second deadline
+between stages and blocks; an individual solver call is not preempted.
+Existing recovery output limits still apply. JSON records per-file MD5
+verification and PAR2-specific limits. Failed or incomplete reconstruction never
+exports zero-filled staging gaps as recovered data.
+
+#### Native Split ZIP
+
+Select the final `.zip` or an available `.z01`, `.z02`, etc. Recovery stages
+matching regular disks and can use Info-ZIP (`zip` on `PATH`, or a trusted
+executable configured through `ZARCHIVE_ZIP_TOOL`) to convert a complete set.
+Every entry in the converted copy must pass bounded size and CRC verification
+before it is accepted. Some system Info-ZIP builds return success yet corrupt
+cross-disk payloads; those copies are discarded automatically.
+
+Without a valid converted copy, the built-in ZIP backend scans local entries
+directly across the original disk layout and rebuilds the exported ZIP using
+the existing writer. Missing disks remain positional gaps; inferred sizes and
+uncertain offsets are reported. Intact entries after a gap can still be
+recovered. Missing bytes are not parity-reconstructed without a matching PAR2
+set. Damaged or ZIP64 disk-count metadata can prevent layout recovery, and
+encrypted entries may require a usable reconstructed central directory.
+
+#### Parity Reconstruction
+
+For a RAR or REV source, enable **Reconstruct using parity data** before choosing
+**Recover files**. Put all available original RAR volumes and matching REV files
+in one folder. You can select an existing later volume or a REV file even when
+the first RAR volume is missing.
+
+This feature requires the official **RAR command-line tool**, not only UnRAR.
+Install `rar` (`rar.exe` on Windows) on `PATH`, or set `ZARCHIVE_RAR_TOOL` to the
+full path of a trusted RAR executable before launching zarchive. RAR is a
+separately licensed optional dependency; zarchive does not download or bundle it.
+For example:
+
+```sh
+ZARCHIVE_RAR_TOOL=/absolute/path/to/rar cargo run
+```
+
+The application stages only matching regular RAR/REV files in a private folder,
+rejects symlinks, then runs `rar r` for an embedded recovery record or `rar rc`
+for REV volumes. No shell is used, passwords are not placed on the command line,
+stdin is disabled, and user RAR configuration is ignored. The tool receives only
+private filenames, not paths to the original archive. Native recovery then
+checks files from the resulting copy before they are exported.
+
+Reports distinguish parity reconstruction, structure-only rebuilding, unchanged
+data, a missing tool, insufficient recovery data, and safety limits. A `fixed.*`
+candidate does not by itself prove every file was repaired: normal CRC and size
+verification still decides each entry's status. Diagnostic offsets from this
+stage refer to the private repaired copy, as stated in the result notes.
+
+The parity stage accepts up to 128 input files totaling 1 GiB, monitors a 3 GiB
+workspace budget, and stops its child process after 120 seconds or cancellation.
+Originals stay untouched; staged copies and repair output are deleted when no
+longer needed. Limits and tool failures fall back to ordinary best-effort
+recovery. External repair is not sandboxed and still depends on having enough
+valid parity data. Encrypted headers that require interactive credentials may
+not be repaired by this noninteractive stage; the normal recovery password field
+is used afterward when reading a repaired candidate.
+
+This external engine implements RAR recovery records and REV volumes; PAR2 uses
+the separate native backend described above. 7z has no equivalent native
+recovery record. The parity checkbox is not offered for 7z, ZIP, or TAR without
+a matching PAR2 sidecar.
+
+The real-engine integration test creates an archive with a recovery record,
+corrupts its stored payload, reconstructs it, and compares recovered bytes. It
+also deletes a first RAR volume and verifies reconstruction from REV, including
+when selecting a REV file. Run it explicitly after installing RAR:
+
+```sh
+cargo test --locked parity_real_rar_reconstructs_recovery_record_and_missing_rev_volume -- --ignored --nocapture
+```
+
+Ordinary CI tests cover staging, optional-tool handling, and UI integration
+without requiring RAR; the real-engine test is intentionally ignored by default.
+
+For a manual TAR repair example, generate a small V7 archive with a bad checksum,
+a destroyed middle header, and a truncated last file, plus its repaired copy:
+
+```sh
+cargo test --locked generate_tar_repair_sample -- --ignored --nocapture
+```
+
+Open `samples/38-tar-repair.tar` through **Archive Repair & Recovery**, run
+**Recover files**, and choose **Export**. The first file should be
+unverified, the last partial, and the missing middle header listed as a damaged
+range. `samples/38-tar-repaired.tar` is the generator's verified readable output.
+Existing sample files are not overwritten.
 
 ## Cross-Platform
 

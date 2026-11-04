@@ -940,6 +940,7 @@ pub(crate) fn toolbox_bar(
                 let view = audit_view.clone();
                 let audit_view = audit_view.clone();
                 let full_audit_view = audit_view.clone();
+                let recovery_view = audit_view.clone();
                 let compare_view = audit_view.clone();
                 menu.min_w(px(240.0))
                     .item(
@@ -986,6 +987,14 @@ pub(crate) fn toolbox_bar(
                                         cx,
                                     )
                                 });
+                            }),
+                    )
+                    .separator()
+                    .item(
+                        PopupMenuItem::new(language.text("Archive Repair & Recovery"))
+                            .icon(spaced_icon(gpui::assets::IconName::Wrench))
+                            .on_click(move |_, window, cx| {
+                                let _ = recovery_view.update(cx, |this, cx| this.open_recovery(window, cx));
                             }),
                     )
                     .separator()

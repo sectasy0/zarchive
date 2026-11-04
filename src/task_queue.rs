@@ -90,6 +90,10 @@ pub(crate) fn checkpoint() -> io::Result<()> {
     }
 }
 
+pub(crate) fn cancellation_requested() -> bool {
+    CURRENT_TASK.with_borrow(|current| current.as_ref().is_some_and(|(control, _)| control.is_cancelled()))
+}
+
 pub(crate) fn report_bytes(amount: u64) {
     CURRENT_TASK.with_borrow(|current| {
         if let Some((_, reporter)) = current {

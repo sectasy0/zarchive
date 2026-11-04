@@ -16,6 +16,7 @@ use gpui::component::{
 };
 
 pub(crate) const VOLUME_PRESETS: [u64; 6] = [100_000_000, 250_000_000, 500_000_000, 1_000_000_000, 2_000_000_000, 4_000_000_000];
+pub(crate) const PARITY_PRESETS: [u32; 5] = [5, 10, 20, 30, 50];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 /// Identifies which creation-form choice is being read or updated.
@@ -30,6 +31,7 @@ pub(crate) enum ChoiceField {
     Dictionary,
     VolumeSize,
     VolumeUnit,
+    RecoveryPercent,
 }
 
 /// Stores the selected sources, output options, encryption fields, and validation error.
@@ -46,6 +48,8 @@ pub(crate) struct ArchiveCreationForm {
     pub password: crate::secret::SecretInput,
     /// Password confirmation entered for encryption.
     pub confirmation: crate::secret::SecretInput,
+    pub create_parity: bool,
+    pub parity_percent: usize,
     split: bool,
     volume_preset: usize,
     volume_unit: usize,
@@ -80,6 +84,8 @@ impl ArchiveCreationForm {
             encrypt: false,
             password: crate::secret::SecretInput::new(cx),
             confirmation: crate::secret::SecretInput::new(cx),
+            create_parity: false,
+            parity_percent: 1,
             split: false,
             volume_preset: 0,
             volume_unit: 0,
@@ -113,6 +119,7 @@ impl ArchiveCreationForm {
                 .unwrap_or(1),
             ChoiceField::VolumeSize => self.volume_preset,
             ChoiceField::VolumeUnit => self.volume_unit,
+            ChoiceField::RecoveryPercent => self.parity_percent,
         }
     }
 
@@ -150,8 +157,13 @@ impl ArchiveCreationForm {
             ChoiceField::Dictionary => self.options.dictionary_mib = [1, 8, 32, 64][index],
             ChoiceField::VolumeSize => self.volume_preset = index,
             ChoiceField::VolumeUnit => self.volume_unit = index,
+            ChoiceField::RecoveryPercent => self.parity_percent = index,
         }
         self.error = None;
+    }
+
+    fn recovery_percent(&self) -> u32 {
+        PARITY_PRESETS.get(self.parity_percent).copied().unwrap_or(10)
     }
 
     fn resolved_options(&self) -> Result<CreateOptions, &'static str> {
@@ -349,6 +361,8 @@ impl ArchiveManager {
         let path = output.clone();
         let work_path = path.clone();
         let total_sources = sources.len() as u64;
+        let create_parity = self.creation.create_parity;
+        let parity_percent = self.creation.recovery_percent();
         self.creation.error = None;
         self.status_message = None;
         let task_id = self.background_queue.enqueue(
@@ -385,6 +399,15 @@ impl ArchiveManager {
                             this.language.text("Created"),
                             archive_path.display()
                         ));
+                        if create_parity {
+                            this.start_parity_creation(
+                                path.clone(),
+                                archive_path.clone(),
+                                options.volume_size.is_some(),
+                                parity_percent,
+                                cx,
+                            );
+                        }
                     }
                     Err(crate::task_queue::TaskFailure::Cancelled) => {},
                     Err(crate::task_queue::TaskFailure::Failed(error)) => {
@@ -402,6 +425,58 @@ impl ArchiveManager {
         );
         self.creation_task = Some(task_id);
         cx.notify();
+    }
+
+    fn start_parity_creation(
+        &mut self,
+        archive_path: PathBuf,
+        first_volume: PathBuf,
+        split: bool,
+        recovery_percent: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let mut sidecar_name = archive_path.file_name().unwrap_or_default().to_os_string();
+        sidecar_name.push(".par2");
+        let sidecar = archive_path.with_file_name(sidecar_name);
+        let control_paths = [archive_path.clone(), first_volume.clone(), sidecar];
+        let task = self.background_queue.enqueue(
+            "Creating PAR2 recovery files...",
+            crate::task_queue::TaskControl::default().for_paths(control_paths),
+            move |control, reporter| async move {
+                crate::parity::create_par2(
+                    &archive_path,
+                    &first_volume,
+                    split,
+                    recovery_percent,
+                    control,
+                    reporter,
+                )
+            },
+            move |this, result, _, cx| {
+                this.creation_task = None;
+                match result {
+                    Ok(paths) => {
+                        this.status_message = Some(format!(
+                            "{} {}",
+                            this.language.text("Created PAR2 recovery files"),
+                            paths.first().map_or_else(String::new, |path| path.display().to_string())
+                        ));
+                    }
+                    Err(crate::task_queue::TaskFailure::Cancelled) => {
+                        this.status_message = Some(this.language.text("PAR2 creation was cancelled; the archive was created").to_owned());
+                    }
+                    Err(crate::task_queue::TaskFailure::Failed(error)) => {
+                        this.status_message = Some(format!(
+                            "{}: {error:#}",
+                            this.language.text("Failed to create PAR2 recovery files")
+                        ));
+                    }
+                }
+                cx.notify();
+            },
+            cx,
+        );
+        self.creation_task = Some(task);
     }
 }
 
@@ -671,6 +746,20 @@ pub(crate) fn view(
                 })
         })
         .child(
+            Checkbox::new("create-par2-recovery")
+                .debug_selector(|| "create-par2-recovery".to_owned())
+                .label(language.text("Create PAR2 recovery files"))
+                .checked(form.create_parity)
+                .on_change(cx.listener(|this, checked, _, cx| {
+                    this.creation.create_parity = *checked;
+                    cx.notify();
+                })),
+        )
+        .when(form.create_parity, |this| {
+            this.child(language.text("Recovery data"))
+                .child(crate::ui::select(manager, crate::ui::Selector::RecoveryPercent))
+        })
+        .child(
             Checkbox::new("include-hidden-files")
                 .debug_selector(|| "include-hidden-files".to_owned())
                 .label(language.text("Include hidden files"))
@@ -757,6 +846,10 @@ mod tests {
             assert_eq!(form.resolved_options().unwrap().volume_size, Some(1_000_000));
             form.custom_volume_size = "invalid".to_owned();
             assert!(form.resolved_options().is_err());
+            for (index, percent) in PARITY_PRESETS.into_iter().enumerate() {
+                form.apply(ChoiceField::RecoveryPercent, index);
+                assert_eq!(form.recovery_percent(), percent);
+            }
             form.apply(ChoiceField::Format, ResolvedFormat::CREATION_FORMATS.iter().position(|format| *format == ResolvedFormat::Cpio).unwrap());
             assert!(!form.split);
             assert!(form.resolved_options().unwrap().volume_size.is_none());
@@ -778,6 +871,13 @@ mod tests {
         });
         assert!(cx.debug_bounds("split-into-volumes").is_some());
         assert!(cx.debug_bounds("creation-volume-size").is_none());
+        assert!(cx.debug_bounds("create-par2-recovery").is_some());
+        assert!(cx.debug_bounds("creation-parity-percent").is_none());
+        click_control(cx, "create-par2-recovery");
+        assert!(cx.debug_bounds("creation-parity-percent").is_some());
+        cx.read(|cx| assert!(view.read(cx).creation.create_parity));
+        click_control(cx, "create-par2-recovery");
+        assert!(cx.debug_bounds("creation-parity-percent").is_none());
         click_control(cx, "split-into-volumes");
         click_control(cx, "creation-volume-size");
         for _ in 0..3 { cx.simulate_keystrokes("down"); }
@@ -820,6 +920,7 @@ mod tests {
             manager.creation.sources.push(source.clone());
             manager.creation.options.compression = CompressionLevel::Stored;
             manager.creation.split = true;
+            manager.creation.create_parity = true;
             manager.creation.volume_preset = VOLUME_PRESETS.len();
             manager.creation.custom_volume_size = "0.001".to_owned();
             manager.creation.encrypt = true;
@@ -837,6 +938,22 @@ mod tests {
         let first = crate::volumes::part_path(&output, 1);
         assert!(!output.exists());
         assert!(crate::volumes::part_path(&output, 2).is_file());
+        let parity = output.with_file_name("protected.zip.par2");
+        assert!(parity.is_file());
+        let parity_set = rust_par2::parse(&parity).unwrap();
+        assert!(parity_set.files.len() >= 2);
+        let recovery_blocks = std::fs::read_dir(root.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name().is_some_and(|name| {
+                    name.to_string_lossy().starts_with("protected.zip")
+                }) && path.extension().is_some_and(|extension| extension == "par2")
+            })
+            .map(|path| rust_par2::parse(&path).unwrap().recovery_block_count)
+            .sum::<u32>();
+        assert!(recovery_blocks > 0);
         cx.read(|cx| {
             let manager = view.read(cx);
             assert!(manager.creation_task.is_none());
@@ -1200,6 +1317,7 @@ fn choice_view(
             ChoiceField::Dictionary => crate::ui::Selector::Dictionary,
             ChoiceField::VolumeSize => crate::ui::Selector::VolumeSize,
             ChoiceField::VolumeUnit => crate::ui::Selector::VolumeUnit,
+            ChoiceField::RecoveryPercent => crate::ui::Selector::RecoveryPercent,
         },
     )
 }

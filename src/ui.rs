@@ -28,6 +28,7 @@ pub enum Selector {
     Dictionary,
     VolumeSize,
     VolumeUnit,
+    RecoveryPercent,
 }
 
 /// Retains selector options, selected index, and its event subscription.
@@ -122,6 +123,9 @@ impl Controls {
                         Selector::Dictionary => this.creation.apply(ChoiceField::Dictionary, index),
                         Selector::VolumeSize => this.creation.apply(ChoiceField::VolumeSize, index),
                         Selector::VolumeUnit => this.creation.apply(ChoiceField::VolumeUnit, index),
+                        Selector::RecoveryPercent => {
+                            this.creation.apply(ChoiceField::RecoveryPercent, index)
+                        }
                     }
                     cx.notify();
                 }
@@ -397,6 +401,15 @@ pub fn prepare(
         Selector::VolumeUnit, ["MB", "GB"].map(SharedString::from).to_vec(),
         manager.creation.selected(ChoiceField::VolumeUnit), window, cx,
     );
+    manager.controls.sync(
+        Selector::RecoveryPercent,
+        ["5%", "10%", "20%", "30%", "50%"]
+            .map(SharedString::from)
+            .to_vec(),
+        manager.creation.selected(ChoiceField::RecoveryPercent),
+        window,
+        cx,
+    );
 }
 
 /// Renders one retained selector with its localized accessibility label.
@@ -410,6 +423,7 @@ pub fn select(manager: &ArchiveManager, selector: Selector) -> impl IntoElement 
         Selector::Dictionary => ("creation-dictionary", "Dictionary size"),
         Selector::VolumeSize => ("creation-volume-size", "Volume size"),
         Selector::VolumeUnit => ("creation-volume-unit", "Size unit"),
+        Selector::RecoveryPercent => ("creation-parity-percent", "Recovery data"),
     };
     let selected = match &control.state {
         SelectStateHandle::Flat(state) => Select::new(state)
