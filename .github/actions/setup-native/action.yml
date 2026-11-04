@@ -39,6 +39,17 @@ runs:
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
+        $mingwGccDirectories = @(
+          Get-Command x86_64-w64-mingw32-gcc -All -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandType -eq 'Application' } |
+            ForEach-Object { [System.IO.Path]::GetFullPath((Split-Path $_.Source -Parent)).TrimEnd('\') }
+        )
+        $env:PATH = ($env:PATH -split ';' | Where-Object {
+          if ([string]::IsNullOrWhiteSpace($_)) { return $false }
+          $directory = [System.IO.Path]::GetFullPath($_.Trim().Trim('"')).TrimEnd('\')
+          ($directory -notmatch '(?i)mingw') -and ($mingwGccDirectories -notcontains $directory)
+        }) -join ';'
+        "PATH=$env:PATH" >> $env:GITHUB_ENV
         & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install --triplet x64-windows zlib bzip2 liblzma zstd lz4 openssl
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         "LIBCLANG_PATH=C:/Program Files/LLVM/bin" >> $env:GITHUB_ENV

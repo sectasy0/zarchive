@@ -20,9 +20,22 @@ env:
 
 jobs:
   test:
-    name: Tests (macOS ARM64)
-    runs-on: macos-15
+    name: Tests (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+          - platform: linux-x64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - platform: windows-x64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
     steps:
       - name: Check Out Sources
         uses: actions/checkout@v4
@@ -31,15 +44,21 @@ jobs:
         uses: ./.github/actions/setup-native
 
       - name: Install Pinned Rust Toolchain
+        shell: bash
         run: rustup show
+      - name: Install Test Target
+        shell: bash
+        run: rustup target add "$BUILD_TARGET"
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
 
       - name: Cache Cargo Build
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: macos-tests
+          key: tests-${{ matrix.target }}
 
       - name: Run Tests
-        run: cargo test --locked
+        run: cargo test --locked --target ${{ matrix.target }}
 
   build:
     name: Build (${{ matrix.platform }})
