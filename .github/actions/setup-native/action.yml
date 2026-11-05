@@ -52,6 +52,9 @@ runs:
         "PATH=$env:PATH" >> $env:GITHUB_ENV
         & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install --triplet x64-windows zlib bzip2 liblzma zstd lz4 openssl
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $vcpkgInstalled = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows"
+        "CMAKE_PREFIX_PATH=$vcpkgInstalled" >> $env:GITHUB_ENV
+        "ZLIB_ROOT=$vcpkgInstalled" >> $env:GITHUB_ENV
         "LIBCLANG_PATH=C:/Program Files/LLVM/bin" >> $env:GITHUB_ENV
         "BINDGEN_EXTRA_CLANG_ARGS=--target=x86_64-pc-windows-msvc" >> $env:GITHUB_ENV
         "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" >> $env:GITHUB_PATH

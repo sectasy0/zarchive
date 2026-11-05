@@ -37,6 +37,7 @@ use extract::temporary_suffix;
 
 
 #[cfg(test)]
+#[allow(unused_imports)]
 use write::{collect_archive_sources, write_extended_archive, write_rar_archive_with_program};
 #[cfg(test)]
 use write::rar_program;
