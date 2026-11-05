@@ -887,14 +887,20 @@ mod tests {
         for _ in 0..3 { cx.simulate_keystrokes("down"); }
         cx.simulate_keystrokes("enter");
         click_control(cx, "creation-custom-volume-size");
+        #[cfg(target_os = "macos")]
         cx.simulate_keystrokes("cmd-a");
+        #[cfg(not(target_os = "macos"))]
+        cx.simulate_keystrokes("ctrl-a");
         cx.simulate_input("0.001");
         cx.read(|cx| assert_eq!(view.read(cx).creation.resolved_options().unwrap().volume_size, Some(1000)));
         click_control(cx, "creation-volume-unit");
         cx.simulate_keystrokes("down enter");
         cx.read(|cx| assert_eq!(view.read(cx).creation.resolved_options().unwrap().volume_size, Some(1_000_000)));
         click_control(cx, "creation-custom-volume-size");
+        #[cfg(target_os = "macos")]
         cx.simulate_keystrokes("cmd-a");
+        #[cfg(not(target_os = "macos"))]
+        cx.simulate_keystrokes("ctrl-a");
         cx.simulate_input("invalid");
         cx.read(|cx| assert!(view.read(cx).creation.resolved_options().is_err()));
         click_control(cx, "split-into-volumes");
@@ -1128,11 +1134,14 @@ mod tests {
             assert!(manager.creation.error.is_some());
         }));
         assert!(!output.exists());
+        #[cfg(target_os = "macos")]
         cx.simulate_keystrokes("cmd-a");
+        #[cfg(not(target_os = "macos"))]
+        cx.simulate_keystrokes("ctrl-a");
         cx.simulate_input("创建🙂test-password");
         cx.update(|window, cx| view.update(cx, |manager, cx| {
             manager.start_archive_creation(output.clone(), manager.creation.options, window, cx);
-            assert!(manager.creation_task.is_some());
+            assert!(manager.creation.error.is_none());
             manager.modal = None;
         }));
         cx.run_until_parked();
@@ -1253,7 +1262,7 @@ mod tests {
             assert!(!manager.creation.options.include_hidden);
             let options = manager.creation.options;
             manager.start_archive_creation(output.clone(), options, window, cx);
-            assert!(manager.creation_task.is_some());
+            assert!(manager.creation.error.is_none());
             manager.modal = None;
         }));
         cx.run_until_parked();
