@@ -72,5 +72,8 @@ zip = { version = "9.1.3", default-features = false, features = ["deflate", "aes
 [dev-dependencies]
 gpui = { package = "gpui-kit", version = "0.8.1", features = ["test-support"] }
 
+[patch.crates-io]
+libarchive2 = { path = "vendor/libarchive2" }
+
 [profile.dev.package.image]
 opt-level = 3
