@@ -1060,7 +1060,7 @@ mod tests {
                 assert_eq!(empty.as_file().metadata().unwrap().len(), 0);
                 let expanded = directory
                     .path()
-                    .join(format!("expanded-{format:?}-{compression:?}"));
+                    .join(format!("expanded-{}-{compression:?}", format.extension()));
                 super::extract_archive_to(&output, &expanded, None).unwrap();
                 assert_eq!(
                     std::fs::read(expanded.join("sources/nested/中文.txt")).unwrap(),
@@ -1486,7 +1486,7 @@ mod tests {
             assert_eq!(contents, "Private archive contents");
             let expanded = directory
                 .path()
-                .join(format!("expanded-{format:?}-{solid}-{encrypt_headers}"));
+                .join(format!("expanded-{}-{solid}-{encrypt_headers}", format.extension()));
             assert!(super::extract_archive_to(&output, &expanded, Some("wrong-password")).is_err());
             assert!(!expanded.exists());
             super::extract_archive_to(&output, &expanded, Some("test-password")).unwrap();
@@ -1545,7 +1545,7 @@ mod tests {
                 password,
             )
             .unwrap();
-            let folder = output.path().join(format!("selected-{format:?}"));
+            let folder = output.path().join(format!("selected-{}", format.extension()));
             super::extract_archive_selection_to(&path, &folder, password, Some("source/selected"))
                 .unwrap();
             assert_eq!(
@@ -1556,7 +1556,7 @@ mod tests {
             assert!(!folder.join("source").exists());
             assert!(!folder.join("selected-other").exists());
             assert!(!folder.join("000-before").exists());
-            let file = output.path().join(format!("single-{format:?}.txt"));
+            let file = output.path().join(format!("single-{}.txt", format.extension()));
             super::extract_archive_selection_to(
                 &path,
                 &file,
@@ -1574,7 +1574,7 @@ mod tests {
                 )
                 .is_err()
             );
-            let missing = output.path().join(format!("missing-{format:?}"));
+            let missing = output.path().join(format!("missing-{}", format.extension()));
             assert!(
                 super::extract_archive_selection_to(&path, &missing, password, Some("missing.txt"))
                     .is_err()

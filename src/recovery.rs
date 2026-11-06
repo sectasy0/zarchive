@@ -257,7 +257,7 @@ impl Recovery {
                 ..Default::default()
             },
         )?;
-        File::open(&staged)?.sync_all()?;
+        File::options().write(true).open(&staged)?.sync_all()?;
         crate::task_queue::checkpoint()?;
         staged
             .persist_noclobber(destination)

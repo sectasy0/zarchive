@@ -553,6 +553,20 @@ impl<'a> WriteArchive<'a> {
 
         unsafe {
             match option {
+                FormatOption::CpioHeaderCharset(charset) => {
+                    let charset = CString::new(charset.as_str()).map_err(|_| {
+                        Error::InvalidArgument("Charset contains null byte".to_string())
+                    })?;
+                    Error::from_return_code(
+                        libarchive2_sys::archive_write_set_format_option(
+                            self.archive,
+                            c"cpio".as_ptr(),
+                            c"hdrcharset".as_ptr(),
+                            charset.as_ptr(),
+                        ),
+                        self.archive,
+                    )?;
+                }
                 FormatOption::ZipCompressionMethod(method) => {
                     let method_str = match method {
                         ZipCompressionMethod::Store => CString::new("store").unwrap(),

@@ -136,15 +136,22 @@ pub(super) fn open_tar_reader(path: &Path, format: ResolvedFormat) -> Result<Box
 pub(crate) struct ExtendedEntryReader<'a, 'b>(pub(crate) &'a mut libarchive2::ReadArchive<'b>);
 
 pub(crate) fn open_extended_archive(path: &Path) -> Result<libarchive2::ReadArchive<'static>> {
-    if crate::volumes::numbered_base(path).is_some() {
-        Ok(libarchive2::ReadArchive::open_callback(
+    let options: &[(&str, &str, &str)] = if ResolvedFormat::from_path(path) == Some(ResolvedFormat::Cpio) {
+        &[("cpio", "hdrcharset", "UTF-8")]
+    } else {
+        &[]
+    };
+    let archive = if crate::volumes::numbered_base(path).is_some() {
+        libarchive2::ReadArchive::open_callback_with_options(
             libarchive2::CallbackReader::new(crate::task_queue::TaskReader(open_archive_reader(
                 path,
             )?)),
-        )?)
+            options,
+        )?
     } else {
-        Ok(libarchive2::ReadArchive::open(path)?)
-    }
+        libarchive2::ReadArchive::open_with_options(path, options)?
+    };
+    Ok(archive)
 }
 
 impl Read for ExtendedEntryReader<'_, '_> {

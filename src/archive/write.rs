@@ -147,7 +147,7 @@ pub(super) fn create_archive_contents(
             .into_temp_path();
         std::fs::remove_file(&output)?;
         write_rar_archive(&output, &entries, options.compression)?;
-        File::open(&output)?.sync_all()?;
+        File::options().write(true).open(&output)?.sync_all()?;
         crate::task_queue::checkpoint()?;
         output
             .persist(path)
@@ -963,7 +963,11 @@ pub(super) fn write_extended_archive(
                 .all(|(_, name, directory)| !directory && !name.contains('/')),
         "AR archives support individual files, not folders"
     );
-    let mut archive = WriteArchive::new().format(backend).open_file(path)?;
+    let mut writer = WriteArchive::new().format(backend);
+    if format == ResolvedFormat::Cpio {
+        writer = writer.format_option(libarchive2::FormatOption::CpioHeaderCharset("UTF-8".into()));
+    }
+    let mut archive = writer.open_file(path)?;
     let mut buffer = [0_u8; 65536];
     for (index, (source, name, directory)) in entries.iter().enumerate() {
         crate::task_queue::checkpoint()?;

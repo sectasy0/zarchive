@@ -172,6 +172,8 @@ impl CompressionLevel {
 /// Format-specific options for archive writing
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FormatOption {
+    /// CPIO: Set the character encoding used for entry names.
+    CpioHeaderCharset(String),
     /// ZIP: Set compression method
     ZipCompressionMethod(ZipCompressionMethod),
 

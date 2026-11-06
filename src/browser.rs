@@ -407,7 +407,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source.txt");
         std::fs::write(&source, b"dated entry").unwrap();
-        let file = std::fs::File::open(&source).unwrap();
+        let file = std::fs::File::options().write(true).open(&source).unwrap();
         let timestamp = chrono::DateTime::parse_from_rfc3339("2024-02-29T12:00:00Z").unwrap();
         file.set_times(std::fs::FileTimes::new().set_modified(timestamp.into())).unwrap();
         let expected = timestamp.with_timezone(&chrono::Local).date_naive();

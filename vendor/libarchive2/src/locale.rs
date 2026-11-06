@@ -78,7 +78,9 @@ mod inner {
     }
     const _ENABLE_PER_THREAD_LOCALE: std::os::raw::c_int = 1;
 
-    pub(crate) struct UTF8LocaleGuard {}
+    pub(crate) struct UTF8LocaleGuard {
+        _windows: WindowsUTF8LocaleGuard,
+    }
 
     pub(crate) struct WindowsUTF8LocaleGuard {
         save: Option<std::ffi::CString>,
@@ -87,7 +89,7 @@ mod inner {
 
     impl UTF8LocaleGuard {
         pub(crate) fn new() -> Self {
-            Self {}
+            Self { _windows: WindowsUTF8LocaleGuard::new() }
         }
     }
 

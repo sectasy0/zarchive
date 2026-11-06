@@ -52,9 +52,18 @@ impl<'a> ReadArchive<'a> {
 
     /// Open an archive file for reading
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Self::open_with_options(path, &[])
+    }
+
+    /// Open a file after applying reader options before format detection.
+    pub fn open_with_options<P: AsRef<Path>>(path: P, options: &[(&str, &str, &str)]) -> Result<Self> {
+        let _locale = crate::locale::UTF8LocaleGuard::new();
         let mut reader = Self::new()?;
         reader.support_filter_all()?;
         reader.support_format_all()?;
+        for &(module, option, value) in options {
+            reader.set_option(module, option, value)?;
+        }
 
         let path_str = path
             .as_ref()
@@ -371,9 +380,21 @@ impl<'a> ReadArchive<'a> {
     pub fn open_callback<R: std::io::Read + 'static>(
         callback: crate::callbacks::CallbackReader<R>,
     ) -> Result<Self> {
+        Self::open_callback_with_options(callback, &[])
+    }
+
+    /// Open a callback stream after applying reader options before format detection.
+    pub fn open_callback_with_options<R: std::io::Read + 'static>(
+        callback: crate::callbacks::CallbackReader<R>,
+        options: &[(&str, &str, &str)],
+    ) -> Result<Self> {
+        let _locale = crate::locale::UTF8LocaleGuard::new();
         let mut reader = Self::new()?;
         reader.support_filter_all()?;
         reader.support_format_all()?;
+        for &(module, option, value) in options {
+            reader.set_option(module, option, value)?;
+        }
 
         let (client_data, read_cb, close_cb, drop_fn) = callback.into_raw_parts();
 
