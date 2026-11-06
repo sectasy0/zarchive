@@ -60,10 +60,21 @@ jobs:
           cache-on-failure: true
 
       - name: Test Native Library Discovery
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           rustc --edition 2024 --test build.rs -o build-script-tests.exe
           ./build-script-tests.exe
+
+      - name: Test Native Library Discovery (MSVC)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $linker = Join-Path $env:VCToolsInstallDir 'bin/Hostx64/x64/link.exe'
+          rustc --edition 2024 --test build.rs -C "linker=$linker" -o build-script-tests.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\build-script-tests.exe
+          exit $LASTEXITCODE
 
       - name: Run Tests
         run: cargo test --locked --target ${{ matrix.target }}
