@@ -91,6 +91,7 @@ impl<'a> Entry<'a> {
     /// (which can happen with non-ASCII filenames in certain archive formats),
     /// it falls back to the raw pathname and uses lossy UTF-8 conversion.
     pub fn pathname(&self) -> Option<String> {
+        let _locale = crate::locale::UTF8LocaleGuard::new();
         unsafe {
             // First try the UTF-8 version
             let ptr = libarchive2_sys::archive_entry_pathname_utf8(self.entry);

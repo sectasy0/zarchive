@@ -1127,6 +1127,35 @@ mod tests {
     }
 
     #[test]
+    fn ar_raw_utf8_names_survive_listing_and_preview() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("raw-unicode.ar");
+        let name = "\u{6587}\u{5b57}.txt";
+        let payload = b"Unicode AR preview";
+        let size = name.len() + payload.len();
+        let header = format!(
+            "{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
+            format!("#1/{}", name.len()), 0, 0, 0, "100644", size,
+        );
+        assert_eq!(header.len(), 60);
+        let mut bytes = b"!<arch>\n".to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.extend_from_slice(payload);
+        if size % 2 != 0 {
+            bytes.push(b'\n');
+        }
+        std::fs::write(&path, bytes).unwrap();
+        let entries = list_archive(&path).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, name);
+        let preview = super::read_entry_prefix_with_limit(
+            &path, name, None, &std::sync::atomic::AtomicBool::new(false), 1024,
+        ).unwrap();
+        assert_eq!(preview, payload);
+    }
+
+    #[test]
     #[cfg(target_os = "macos")]
     fn extended_archives_interoperate_with_system_reader() {
         let root = tempfile::tempdir().unwrap();
