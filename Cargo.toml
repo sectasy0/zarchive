@@ -13,6 +13,10 @@ codegen-units = 1
 strip = "symbols"
 panic = "abort"
 
+[profile.release.package.libarchive2-sys]
+opt-level = 3
+debug = false
+
 [package.metadata.bundle]
 name = "zarchive"
 identifier = "io.github.sectasy0.zarchive"
