@@ -1,4 +1,4 @@
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, path::{Path, PathBuf}};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -16,11 +16,22 @@ fn stage_vcpkg_zlib() {
         return;
     };
     let installed = PathBuf::from(root).join("installed/x64-windows");
+    if let Some(source) = find_vcpkg_zlib(&installed) {
+        let output = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("zlib.lib");
+        fs::copy(&source, &output).expect("Could not stage the vcpkg zlib library");
+        println!("cargo:rustc-link-search=native={}", output.parent().unwrap().display());
+        println!("cargo:rerun-if-changed={}", source.display());
+        return;
+    }
+    println!("cargo:warning=No vcpkg zlib import library was found for MSVC in {}", installed.display());
+}
+
+fn find_vcpkg_zlib(installed: &Path) -> Option<PathBuf> {
     let candidates = [
-        ("lib", ["libz.lib", "zlib.lib", "libzs.lib", "zlibstatic.lib"]),
+        ("lib", ["z.lib", "libz.lib", "zlib.lib", "zs.lib", "libzs.lib", "zlibstatic.lib"]),
         (
             "debug/lib",
-            ["libzd.lib", "zlibd.lib", "libzsd.lib", "zlibstaticd.lib"],
+            ["zd.lib", "libzd.lib", "zlibd.lib", "zsd.lib", "libzsd.lib", "zlibstaticd.lib"],
         ),
     ];
     for (directory, names) in candidates {
@@ -30,13 +41,35 @@ fn stage_vcpkg_zlib() {
             if !source.is_file() {
                 continue;
             }
-            let output = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("zlib.lib");
-            if fs::copy(&source, &output).is_ok() {
-                println!("cargo:rustc-link-search=native={}", output.parent().unwrap().display());
-                println!("cargo:rerun-if-changed={}", source.display());
-                return;
-            }
+            return Some(source);
         }
     }
-    println!("cargo:warning=No vcpkg zlib import library was found for MSVC");
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_vcpkg_zlib_names_and_prefers_release() {
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = env::temp_dir().join(format!("zarchive-zlib-{}-{unique}", std::process::id()));
+        fs::create_dir_all(root.join("lib")).unwrap();
+        fs::create_dir_all(root.join("debug/lib")).unwrap();
+        assert_eq!(find_vcpkg_zlib(&root), None);
+        for name in ["z.lib", "libz.lib", "zlib.lib", "zs.lib", "libzs.lib", "zlibstatic.lib"] {
+            let source = root.join("lib").join(name);
+            fs::write(&source, b"test library").unwrap();
+            assert_eq!(find_vcpkg_zlib(&root), Some(source.clone()));
+            fs::remove_file(source).unwrap();
+        }
+        let debug = root.join("debug/lib/zd.lib");
+        fs::write(&debug, b"debug library").unwrap();
+        assert_eq!(find_vcpkg_zlib(&root), Some(debug));
+        let release = root.join("lib/z.lib");
+        fs::write(&release, b"release library").unwrap();
+        assert_eq!(find_vcpkg_zlib(&root), Some(release));
+        fs::remove_dir_all(root).unwrap();
+    }
 }
