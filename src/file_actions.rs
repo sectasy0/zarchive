@@ -97,11 +97,13 @@ impl EntryTarget {
     /// Lists only the actions valid for this filesystem or archive target.
     pub fn actions(&self) -> Vec<EntryAction> {
         let mut actions = vec![EntryAction::Open, EntryAction::CopyPath];
+        if !self.is_directory {
+            actions.push(EntryAction::Inspect);
+        }
         if self.archive_entry.is_none() {
             if !self.is_directory && archive::is_supported_archive(&self.path) {
                 actions.extend([EntryAction::ExtractHere, EntryAction::ExtractArchive]);
                 actions.extend([
-                    EntryAction::Inspect,
                     EntryAction::TestIntegrity,
                     EntryAction::Audit,
                 ]);
@@ -430,7 +432,8 @@ pub fn menu(
                             this.request_extract_archive(&target, true, window, cx)
                         }
                         EntryAction::MoveTo => this.request_move(&target, window, cx),
-                        EntryAction::Inspect | EntryAction::TestIntegrity | EntryAction::Audit => {
+                        EntryAction::Inspect => this.preview_archive_target(&target, window, cx),
+                        EntryAction::TestIntegrity | EntryAction::Audit => {
                             let mode = match action {
                                 EntryAction::TestIntegrity => {
                                     crate::inspection::InspectionMode::Integrity
@@ -596,7 +599,7 @@ mod tests {
         ]);
         target.path = "notes.txt".into();
         assert_eq!(context_menu_groups(&target), vec![
-            vec![Open], vec![CreateArchive], vec![CopyPath, MoveTo], vec![Trash],
+            vec![Open], vec![CreateArchive], vec![Inspect], vec![CopyPath, MoveTo], vec![Trash],
         ]);
         target.is_directory = true;
         assert_eq!(context_menu_groups(&target), vec![
@@ -606,7 +609,7 @@ mod tests {
         assert_eq!(context_menu_groups(&target), vec![vec![Open], vec![CopyPath]]);
         target.is_directory = false;
         target.archive_entry = Some("notes.txt".into());
-        assert_eq!(context_menu_groups(&target), vec![vec![Open], vec![Extract], vec![CopyPath]]);
+        assert_eq!(context_menu_groups(&target), vec![vec![Open], vec![Extract], vec![Inspect], vec![CopyPath]]);
         let grouped: Vec<_> = context_menu_groups(&target).into_iter().flatten().collect();
         assert_eq!(grouped.len(), target.actions().len());
         assert!(target.actions().iter().all(|action| grouped.contains(action)));
@@ -757,6 +760,7 @@ mod tests {
             [
                 EntryAction::Open,
                 EntryAction::CopyPath,
+                EntryAction::Inspect,
                 EntryAction::Extract
             ]
         );

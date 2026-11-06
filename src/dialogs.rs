@@ -365,6 +365,7 @@ fn settings_view(
         SettingsCategory::General => language.text("General"),
         SettingsCategory::Appearance => language.text("Appearance"),
         SettingsCategory::Advanced => language.text("Advanced"),
+        SettingsCategory::Keyboard => language.text("Keyboard shortcuts"),
     };
     let mut page = div()
         .id("settings-category-content")
@@ -385,6 +386,9 @@ fn settings_view(
         );
 
     match category {
+        SettingsCategory::Keyboard => {
+            page = page.child(crate::shortcuts::view(manager, theme, cx));
+        }
         SettingsCategory::General => {
             page = page
                 .child(
@@ -601,7 +605,16 @@ fn settings_view(
                 .gap_1()
                 .child(general_button)
                 .child(appearance_button)
-                .child(advanced_button),
+                .child(advanced_button)
+                .child(
+                    settings_category_button(
+                        "settings-category-keyboard", language.text("Keyboard"), "code",
+                        category == SettingsCategory::Keyboard, theme,
+                    ).on_click(cx.listener(|this, _, _, cx| {
+                        this.settings_category = SettingsCategory::Keyboard;
+                        cx.notify();
+                    })),
+                ),
             )
         .child(page)
 }

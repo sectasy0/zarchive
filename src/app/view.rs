@@ -3,6 +3,7 @@ use super::super::*;
 impl Render for ArchiveManager {
     /// Synchronizes app services and renders the titlebar, browser, sidebar, and inspector.
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::shortcuts::prepare(self, cx);
         ui::prepare(self, window, cx);
         creation::prepare(self, window, cx);
         secret::prepare(self, window, cx);
@@ -37,35 +38,7 @@ impl Render for ArchiveManager {
             .unwrap_or(language.text("File Browser"));
         let folders = folder_tree(&self.entries);
         let search_query = self.toolbar_search.text_query();
-        let mut visible_entries = if self.current_directory.is_some() {
-            self.entries.clone()
-        } else {
-            browser::search_archive_entries(&self.entries, &self.selected_folder, &search_query)
-        };
-        if !search_query.is_empty() {
-            visible_entries.retain(|entry| entry.name.to_lowercase().contains(&search_query));
-        }
-        if self.current_directory.is_some() {
-            visible_entries.extend(
-                self.toolbar_search
-                    .matches
-                    .values()
-                    .map(|result| result.entry.clone()),
-            );
-        }
-        visible_entries.retain(|entry| {
-            let size = if entry.is_directory && self.current_directory.is_some() {
-                self.directory_sizes
-                    .as_ref()
-                    .and_then(|sizes| sizes.get(&entry.name))
-                    .copied()
-            } else {
-                Some(entry.size)
-            };
-            !self.filters.query_invalid
-                && self.filters.criteria.matches(entry, size, entry.modified)
-        });
-        sort_entries(&mut visible_entries, self.sort_column, self.sort_ascending);
+        let visible_entries = self.visible_browser_entries();
         let item_count = visible_entries.len();
         let location_size = self
             .location_size(&visible_entries)
@@ -391,7 +364,26 @@ impl Render for ArchiveManager {
             .id("archive-manager")
             .on_drag_move::<inspector::PreviewResize>(cx.listener(inspector::resize_preview))
             .track_focus(&self.content_focus)
-            .key_context("ArchiveManager")
+            .key_context(if self.content_focus.is_focused(window) && self.modal.is_none() {
+                "ArchiveManager Browser"
+            } else {
+                "ArchiveManager"
+            })
+            .on_action(cx.listener(|this, _: &toolbar::key_actions::SelectPrevious, window, cx| {
+                this.move_browser_selection(-1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &toolbar::key_actions::SelectNext, window, cx| {
+                this.move_browser_selection(1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &toolbar::key_actions::EnterFolder, window, cx| {
+                this.enter_browser_folder(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &toolbar::key_actions::LeaveFolder, window, cx| {
+                this.leave_browser_folder(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &toolbar::key_actions::PreviewSelection, window, cx| {
+                this.preview_browser_selection(window, cx);
+            }))
             .on_action(
                 cx.listener(|this, _: &toolbar::key_actions::OpenFile, _, cx| {
                     if this.modal.is_none() {
@@ -1336,7 +1328,7 @@ fn file_row(
         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
             if event.click_count() != 2 {
                 this.selected_entry = Some(click_target.key.clone());
-                this.preview_archive_target(&click_target, window, cx);
+                window.focus(&this.content_focus, cx);
                 if this.inspector.visible {
                     this.file_scroll
                         .scroll_to_item(row_index, gpui::ScrollStrategy::Nearest);

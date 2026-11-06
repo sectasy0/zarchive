@@ -161,6 +161,7 @@ pub(crate) struct UserPreferences {
     pub(crate) default_location: Option<PathBuf>,
     pub(crate) auto_calculate_folder_sizes: bool,
     pub(crate) advanced: AdvancedSettings,
+    pub(crate) shortcuts: crate::shortcuts::ShortcutSettings,
 }
 
 impl Default for UserPreferences {
@@ -173,6 +174,7 @@ impl Default for UserPreferences {
             default_location: None,
             auto_calculate_folder_sizes: true,
             advanced: AdvancedSettings::default(),
+            shortcuts: crate::shortcuts::ShortcutSettings::default(),
         }
     }
 }
@@ -239,6 +241,7 @@ impl UserPreferences {
                     ),
                 }
             },
+            shortcuts: crate::shortcuts::ShortcutSettings::from_json(value.get("shortcuts")),
         }
     }
 
@@ -264,6 +267,7 @@ impl UserPreferences {
             "accent": self.accent_color.key(),
             "default_location": self.default_location.as_ref().map(|path| path.to_string_lossy()),
             "auto_calculate_folder_sizes": self.auto_calculate_folder_sizes,
+            "shortcuts": self.shortcuts.json(),
             "advanced": {
                 "preview_limit_kib": self.advanced.preview_limit_kib,
                 "csv_max_rows": self.advanced.csv_max_rows,
@@ -332,10 +336,25 @@ mod tests {
                 default_location: Some(location.clone()),
                 auto_calculate_folder_sizes: false,
                 advanced: AdvancedSettings::default(),
+                shortcuts: crate::shortcuts::ShortcutSettings::default(),
             };
             preferences.save(&path).unwrap();
             assert_eq!(UserPreferences::load(&path), preferences);
         }
+    }
+
+    #[test]
+    fn keyboard_shortcuts_persist_and_invalid_saved_bindings_fall_back() {
+        use crate::shortcuts::Command;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("settings.json");
+        let mut preferences = UserPreferences::default();
+        preferences.shortcuts.set(Command::Create, "ctrl-shift-k").unwrap();
+        preferences.shortcuts.set(Command::Audit, "").unwrap();
+        preferences.save(&path).unwrap();
+        assert_eq!(UserPreferences::load(&path), preferences);
+        std::fs::write(&path, br#"{"shortcuts":{"create":"escape","preview":"tab","unknown":"ctrl-a"}}"#).unwrap();
+        assert_eq!(UserPreferences::load(&path).shortcuts, crate::shortcuts::ShortcutSettings::default());
     }
 
     #[test]

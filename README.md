@@ -21,9 +21,12 @@ available while your files are processed.
 
 - **Browse before extracting.** Navigate folders and archives, use Back and
   Forward history, browse the folder tree, sort by name, type, or size, and open
-  individual files in their default desktop applications.
-- **Preview and edit text without extracting.** Single-click a text file on disk,
-  an archive entry, or a standalone compressed text file to preview it in the
+  individual files in their default desktop applications. Up/Down selects rows;
+  Right enters a folder and Left moves to its parent. Selection follows the
+  visible search results, filters, and sorting without opening a preview.
+- **Preview and edit text without extracting.** Select a text file on disk,
+  an archive entry, or a standalone compressed text file, then press Space or
+  choose **Inspector** from its context menu to preview it in the
   bottom panel. UTF-8 and BOM-marked UTF-16 are supported, with syntax
   highlighting, line numbers, searching, scrolling, and copying. Choose Edit to
   modify local files or supported archive entries, then Save or Cancel. CSV table
@@ -121,7 +124,11 @@ available while your files are processed.
 - **Make it your workspace.** Choose a light, dark, or system theme, an accent
   color, one of six interface languages, and a default startup folder. Folder
   sizes are calculated automatically by default, with an option to turn that
-  background work off.
+  background work off. **Settings > Keyboard** lets you record, disable, and
+  reset shortcuts for file opening, archive creation, extraction, integrity
+  checks, auditing, row navigation, folder navigation, and the inspector.
+  Conflicts are rejected and preferences persist between launches. Browser-only
+  shortcuts do not capture typing in search fields or modal controls.
 
 ## Architecture
 

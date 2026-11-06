@@ -334,6 +334,9 @@ impl ArchiveManager {
 }
 
 impl Preview {
+    pub(crate) fn matches_target(&self, target: &EntryTarget) -> bool {
+        self.target.path == target.path && self.target.archive_entry == target.archive_entry
+    }
     fn load_remaining(&mut self, cx: &mut Context<Self>) {
         if self.loading_more {
             return;
@@ -1237,6 +1240,9 @@ mod tests {
             )
         });
         cx.run_until_parked();
+        assert!(cx.debug_bounds("csv-preview-table").is_none());
+        cx.simulate_keystrokes("space");
+        cx.run_until_parked();
         assert!(cx.debug_bounds("csv-preview-table").is_some());
         assert!(cx.debug_bounds("csv-preview-row:0").is_some());
         assert!(cx.debug_bounds("csv-preview-row:999").is_none());
@@ -1266,6 +1272,7 @@ mod tests {
                 cx,
             )
         });
+        cx.simulate_keystrokes("space");
         cx.run_until_parked();
         assert!(cx.debug_bounds("csv-preview-table").is_some());
         cx.update(|_, cx| {
@@ -1280,6 +1287,7 @@ mod tests {
         });
         cx.run_until_parked();
         cx.update(|window, cx| window.click("items.CSV", cx));
+        cx.simulate_keystrokes("space");
         cx.run_until_parked();
         assert!(cx.debug_bounds("csv-preview-table").is_some());
         cx.read(|cx| {
@@ -1421,6 +1429,9 @@ mod tests {
             )
         });
         cx.run_until_parked();
+        assert!(cx.debug_bounds("text-preview").is_none());
+        cx.simulate_keystrokes("space");
+        cx.run_until_parked();
         assert!(cx.debug_bounds("text-preview").is_some());
         cx.read(|cx| {
             let manager = view.read(cx);
@@ -1444,6 +1455,7 @@ mod tests {
                 cx,
             )
         });
+        cx.simulate_keystrokes("space");
         cx.run_until_parked();
         cx.read(|cx| {
             let manager = view.read(cx);
@@ -1474,6 +1486,7 @@ mod tests {
         });
         cx.run_until_parked();
         cx.update(|window, cx| window.click("notes.txt", cx));
+        cx.simulate_keystrokes("space");
         cx.run_until_parked();
         cx.read(|cx| {
             let manager = view.read(cx);
@@ -1512,6 +1525,7 @@ mod tests {
                 cx,
             )
         });
+        cx.simulate_keystrokes("space");
         cx.run_until_parked();
         assert!(cx.debug_bounds("binary-preview-table").is_some());
         assert!(cx.debug_bounds("binary-preview-row-0").is_some());

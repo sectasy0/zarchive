@@ -1851,8 +1851,8 @@ mod tests {
     }
 
     #[gpui::test]
-    /// Covers single-click preview, explicit integrity checks, and multi-archive audit findings.
-    fn single_click_previews_archive_and_integrity_button_checks_it(cx: &mut gpui::TestAppContext) {
+    /// Covers explicit preview, integrity checks, and multi-archive audit findings.
+    fn space_previews_selected_archive_and_integrity_button_checks_it(cx: &mut gpui::TestAppContext) {
         let root = tempfile::tempdir().unwrap();
         let one = root.path().join("one.txt");
         let two = root.path().join("two.txt");
@@ -1879,6 +1879,10 @@ mod tests {
             manager
         });
         cx.update(|window, cx| window.click("archive.zip", cx));
+        complete(cx, &view);
+        assert!(cx.debug_bounds("archive-inspector").is_none());
+        cx.read(|cx| assert!(!view.read(cx).inspector.visible));
+        cx.simulate_keystrokes("space");
         complete(cx, &view);
         assert!(cx.debug_bounds("archive-inspector").is_some());
         assert!(cx.debug_bounds("toolbox-inspect").is_none());

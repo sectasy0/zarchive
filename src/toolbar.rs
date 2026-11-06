@@ -546,34 +546,13 @@ pub(crate) mod key_actions {
             ExtractTo,
             TestIntegrity,
             AuditArchive,
+            SelectPrevious,
+            SelectNext,
+            EnterFolder,
+            LeaveFolder,
+            PreviewSelection,
         ]
     );
-}
-
-/// Returns keyboard bindings using the platform's standard modifier key.
-pub(crate) fn key_bindings() -> [gpui::KeyBinding; 6] {
-    #[cfg(target_os = "macos")]
-    {
-        [
-            gpui::KeyBinding::new("cmd-o", key_actions::OpenFile, None),
-            gpui::KeyBinding::new("cmd-n", key_actions::CreateArchive, None),
-            gpui::KeyBinding::new("cmd-e", key_actions::ExtractHere, None),
-            gpui::KeyBinding::new("cmd-shift-e", key_actions::ExtractTo, None),
-            gpui::KeyBinding::new("cmd-i", key_actions::TestIntegrity, None),
-            gpui::KeyBinding::new("cmd-shift-i", key_actions::AuditArchive, None),
-        ]
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        [
-            gpui::KeyBinding::new("ctrl-o", key_actions::OpenFile, None),
-            gpui::KeyBinding::new("ctrl-n", key_actions::CreateArchive, None),
-            gpui::KeyBinding::new("ctrl-e", key_actions::ExtractHere, None),
-            gpui::KeyBinding::new("ctrl-shift-e", key_actions::ExtractTo, None),
-            gpui::KeyBinding::new("ctrl-i", key_actions::TestIntegrity, None),
-            gpui::KeyBinding::new("ctrl-shift-i", key_actions::AuditArchive, None),
-        ]
-    }
 }
 
 /// Builds a labeled toolbar button with an application or built-in icon.

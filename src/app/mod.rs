@@ -1,3 +1,4 @@
+mod navigation;
 mod view;
 
 pub(crate) use view::{app_icon, format_size};

@@ -1,4 +1,5 @@
 mod archive;
+mod shortcuts;
 mod app;
 mod xar;
 mod blur;
@@ -84,6 +85,7 @@ enum SettingsCategory {
     Appearance,
     /// Preview size and table resource limits.
     Advanced,
+    Keyboard,
 }
 
 #[derive(Clone, Copy)]
@@ -199,6 +201,9 @@ struct ArchiveManager {
     default_location: Option<PathBuf>,
     auto_calculate_folder_sizes: bool,
     advanced_settings: AdvancedSettings,
+    shortcut_settings: shortcuts::ShortcutSettings,
+    shortcut_editor: shortcuts::Editor,
+    preferences_path: Option<PathBuf>,
     modal: Option<Modal>,
     settings_category: SettingsCategory,
     modal_focus: FocusHandle,
@@ -221,7 +226,7 @@ struct ArchiveManager {
 impl ArchiveManager {
     /// Persists language, appearance, accent, and startup-location preferences.
     fn save_preferences(&mut self) {
-        let Some(path) = user_preferences_path() else {
+        let Some(path) = self.preferences_path.clone() else {
             return;
         };
         self.save_preferences_to(&path);
@@ -235,6 +240,7 @@ impl ArchiveManager {
             default_location: self.default_location.clone(),
             auto_calculate_folder_sizes: self.auto_calculate_folder_sizes,
             advanced: self.advanced_settings,
+            shortcuts: self.shortcut_settings.clone(),
         };
         if let Err(error) = preferences.save(path) {
             self.status_message = Some(format!(
@@ -667,7 +673,7 @@ fn main() {
         .with_assets(IconAssets)
         .run(move |cx: &mut App| {
             gpui::init(cx);
-            cx.bind_keys(toolbar::key_bindings());
+            preferences.shortcuts.install(false, cx);
             let default_size = size(px(1100.0), px(720.0));
             let bounds = Bounds::centered(None, default_size, cx);
             gpui::open_window(
@@ -733,6 +739,9 @@ fn main() {
                             default_location: preferences.default_location.clone(),
                             auto_calculate_folder_sizes: preferences.auto_calculate_folder_sizes,
                             advanced_settings: preferences.advanced,
+                            shortcut_settings: preferences.shortcuts.clone(),
+                            shortcut_editor: shortcuts::Editor::default(),
+                            preferences_path: user_preferences_path(),
                             modal: if startup_requires_password {
                                 Some(Modal::Password)
                             } else {
@@ -873,6 +882,9 @@ mod tests {
             default_location: None,
             auto_calculate_folder_sizes: true,
             advanced_settings: AdvancedSettings::default(),
+            shortcut_settings: crate::shortcuts::ShortcutSettings::default(),
+            shortcut_editor: crate::shortcuts::Editor::default(),
+            preferences_path: None,
             modal: None,
             settings_category: super::SettingsCategory::General,
             modal_focus: cx.focus_handle(),
@@ -903,7 +915,7 @@ mod tests {
             if !cx.has_global::<gpui::component::Theme>() {
                 gpui::init(cx);
             }
-            cx.bind_keys(crate::toolbar::key_bindings());
+            crate::shortcuts::ShortcutSettings::default().install(false, cx);
         });
         let mut content = None;
         let (_, window_cx) = cx.add_window_view(|window, cx| {
