@@ -184,12 +184,26 @@ impl ArchiveManager {
             return;
         }
         if self.modal == Some(Modal::CreateArchive) {
-            for path in paths {
-                if !self.creation.sources.contains(path) {
-                    self.creation.sources.push(path.clone());
+            if self.creation.options.format.is_single_compressed() {
+                let dropped_file = paths.iter().any(|path| path.is_file());
+                let selected_file = self.creation.sources.iter().any(|path| path.is_file());
+                if dropped_file || !selected_file {
+                    self.creation.sources = paths.to_vec();
+                    self.creation.normalize_single_compressed_sources();
+                } else {
+                    self.creation.error = Some(
+                        "Compression streams require one file and cannot be created from folders."
+                            .to_owned(),
+                    );
                 }
+            } else {
+                for path in paths {
+                    if !self.creation.sources.contains(path) {
+                        self.creation.sources.push(path.clone());
+                    }
+                }
+                self.creation.error = None;
             }
-            self.creation.error = None;
             cx.notify();
             return;
         }

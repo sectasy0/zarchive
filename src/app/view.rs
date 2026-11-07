@@ -38,10 +38,9 @@ impl Render for ArchiveManager {
             .unwrap_or(language.text("File Browser"))
             .to_owned();
         let folders = folder_tree(&self.entries);
-        let visible_entries = self.visible_browser_entries();
-        let item_count = visible_entries.len();
+        let item_count = self.visible_browser_entries().len();
         let location_size = self
-            .location_size(&visible_entries)
+            .location_size(&self.visible_browser_entries())
             .map(format_size)
             .unwrap_or_else(|| {
                 if !self.auto_calculate_folder_sizes {
@@ -198,6 +197,9 @@ impl Render for ArchiveManager {
         let search_query = self.toolbar_search.text_query();
         let visible_entries = self.visible_browser_entries();
         let item_count = visible_entries.len();
+        let column_order = self.column_order;
+        let visible_columns = self.visible_columns;
+        let column_widths = self.column_widths;
         let archive_path = self.archive_path.clone();
         let current_directory = self.current_directory.clone();
         let archive_password = self.archive_password.clone();
@@ -242,7 +244,12 @@ impl Render for ArchiveManager {
                     .min_h(px(0.0))
                     .overflow_hidden()
                     .bg(rgb(theme.surface))
-                    .child(search_results_skeleton(theme))
+                    .child(search_results_skeleton(
+                        theme,
+                        column_order,
+                        visible_columns,
+                        column_widths,
+                    ))
                     .context_menu(move |menu, _, _| {
                         file_actions::background_menu(
                             menu,
@@ -315,6 +322,9 @@ impl Render for ArchiveManager {
                             cx.processor(move |manager, range: std::ops::Range<usize>, _, cx| {
                                 let previous_browser = manager.active_browser;
                                 manager.active_browser = pane_index;
+                                let column_order = manager.column_order;
+                                let visible_columns = manager.visible_columns;
+                                let column_widths = manager.column_widths;
                                 let drop_marker_row = manager.active_browser_tab().drop_marker_row;
                                 let rows = range
                                     .filter_map(|index| {
@@ -336,6 +346,9 @@ impl Render for ArchiveManager {
                                                 folder_size_known,
                                                 index,
                                                 pane_index,
+                                                column_order,
+                                                visible_columns,
+                                                column_widths,
                                                 drop_marker_row == Some(index),
                                                 theme,
                                                 manager.archive_drop_enabled(),
@@ -388,6 +401,7 @@ impl Render for ArchiveManager {
         div()
             .id("archive-manager")
             .on_drag_move::<inspector::PreviewResize>(cx.listener(inspector::resize_preview))
+            .on_drag_move::<ColumnResizeDrag>(cx.listener(resize_browser_column))
             .track_focus(&self.content_focus)
             .key_context(if self.inspector_focus && self.inspector.visible && self.modal.is_none() {
                 "ArchiveManager Inspector"
@@ -396,6 +410,7 @@ impl Render for ArchiveManager {
             } else {
                 "ArchiveManager"
             })
+            .on_key_down(cx.listener(toolbar::type_to_search))
             .on_action(cx.listener(|this, _: &toolbar::key_actions::SelectPrevious, window, cx| {
                 this.move_browser_selection(-1, window, cx);
             }))
@@ -837,6 +852,73 @@ fn last_visible_drop_row(
     (y > row_bottom && y < viewport.bottom()).then_some(last_visible)
 }
 
+#[derive(Clone, Copy)]
+struct ColumnResizeDrag {
+    pane_index: usize,
+    width_index: usize,
+    start_x: gpui::Pixels,
+    initial_width: f32,
+    min_width: f32,
+    max_width: f32,
+}
+
+#[derive(Clone)]
+struct ColumnDrag {
+    pane_index: usize,
+    column: SortColumn,
+    label: String,
+    theme: Theme,
+}
+
+impl Render for ColumnDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .max_w(px(220.0))
+            .rounded_sm()
+            .border_1()
+            .border_color(rgb(self.theme.accent))
+            .bg(rgb(self.theme.surface))
+            .text_color(rgb(self.theme.text))
+            .text_sm()
+            .shadow_md()
+            .child(
+                gpui::component::Icon::new(gpui::assets::IconName::GripVertical)
+                    .size(px(13.0))
+                    .text_color(rgb(self.theme.accent)),
+            )
+            .child(self.label.clone())
+    }
+}
+
+impl Render for ColumnResizeDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(0.0))
+    }
+}
+
+fn resize_browser_column(
+    manager: &mut ArchiveManager,
+    event: &gpui::DragMoveEvent<ColumnResizeDrag>,
+    _: &mut Window,
+    cx: &mut Context<ArchiveManager>,
+) {
+    let drag = event.drag(cx);
+    if manager.modal.is_some() || drag.pane_index >= manager.browsers.len() {
+        return;
+    }
+    let pane = &mut manager.browsers[drag.pane_index];
+    let tab = &mut pane.tabs[pane.active_tab];
+    let start_x = manager.column_resize_start_x.unwrap_or(drag.start_x);
+    let width = drag.initial_width + f32::from(event.event.position.x - start_x);
+    tab.column_widths[drag.width_index] = width.clamp(drag.min_width, drag.max_width);
+    cx.notify();
+}
+
 fn browser_tab_drop_allowed(path: &Path) -> bool {
     path.is_dir() || archive::is_supported_archive(path)
 }
@@ -1096,6 +1178,37 @@ fn browser_panel(
     let table_selector = table_id;
     let scroll_id = if pane_index == 0 { "file-scroll-viewport" } else { "file-scroll-viewport-secondary" };
     let scrollbar_id = if pane_index == 0 { "file-list-scrollbar" } else { "file-list-scrollbar-secondary" };
+    let column_order = manager.column_order;
+    let visible_columns = manager.visible_columns;
+    let column_widths = manager.column_widths;
+    let header_cells: Vec<_> = column_order
+        .iter()
+        .copied()
+        .filter(|column| visible_columns[sort_column_index(*column)])
+        .enumerate()
+        .map(|(column_index, column)| {
+            let (label, width) = match column {
+                SortColumn::Name => (language.text("NAME"), None),
+                SortColumn::Type => (language.text("TYPE"), Some(column_widths[0])),
+                SortColumn::Size => (language.text("SIZE"), Some(column_widths[1])),
+                SortColumn::Modified => (language.text("MODIFIED"), Some(column_widths[2])),
+            };
+            sort_header(
+                label,
+                width,
+                column,
+                column_index,
+                visible_columns,
+                language,
+                manager.sort_column,
+                manager.sort_ascending,
+                pane_index,
+                theme,
+                cx,
+            )
+            .into_any_element()
+        })
+        .collect();
     let table = gpui::base::Table::new(table_id)
         .debug_selector(move || table_selector.to_owned())
         .flex()
@@ -1117,18 +1230,7 @@ fn browser_panel(
                 .bg(rgb(theme.sidebar))
                 .text_xs()
                 .text_color(rgb(theme.muted_text))
-                .child(sort_header(
-                    language.text("NAME"), None, SortColumn::Name,
-                    manager.sort_column, manager.sort_ascending, pane_index, theme, cx,
-                ))
-                .child(sort_header(
-                    language.text("TYPE"), Some(130.0), SortColumn::Type,
-                    manager.sort_column, manager.sort_ascending, pane_index, theme, cx,
-                ))
-                .child(sort_header(
-                    language.text("SIZE"), Some(90.0), SortColumn::Size,
-                    manager.sort_column, manager.sort_ascending, pane_index, theme, cx,
-                )),
+                .children(header_cells),
         )
         .child(
             div()
@@ -1432,6 +1534,9 @@ fn sort_header(
     label: &'static str,
     width: Option<f32>,
     column: SortColumn,
+    column_index: usize,
+    visible_columns: [bool; 4],
+    language: Language,
     active_column: SortColumn,
     ascending: bool,
     pane_index: usize,
@@ -1443,6 +1548,7 @@ fn sort_header(
         SortColumn::Name => "sort-name",
         SortColumn::Type => "sort-type",
         SortColumn::Size => "sort-size",
+        SortColumn::Modified => "sort-modified",
     };
     let id = if pane_index == 0 {
         base_id
@@ -1451,19 +1557,18 @@ fn sort_header(
             SortColumn::Name => "sort-name-secondary",
             SortColumn::Type => "sort-type-secondary",
             SortColumn::Size => "sort-size-secondary",
+            SortColumn::Modified => "sort-modified-secondary",
         }
-    };
-    let column_index = match column {
-        SortColumn::Name => 0,
-        SortColumn::Type => 1,
-        SortColumn::Size => 2,
     };
     let header = gpui::base::TableHead::new(id, column_index)
         .debug_selector(move || id.to_owned())
+        .relative()
         .flex()
         .items_center()
         .h_full()
         .min_w(px(0.0))
+        .border_1()
+        .border_color(gpui::transparent_black())
         .gap_1()
         .text_size(px(10.0))
         .text_color(rgb(if column == active_column {
@@ -1491,21 +1596,158 @@ fn sort_header(
                         theme.muted_text,
                     ))
                 }),
-        );
+            );
+    let header = header.drag_over::<ColumnDrag>(move |style, drag, _, _| {
+        let valid_target = drag.pane_index == pane_index;
+        style
+            .border_color(rgb(if valid_target { theme.accent } else { 0xef4444 }))
+            .bg(gpui::rgba(if valid_target {
+                (theme.accent << 8) | 0x24
+            } else {
+                0xef44441a
+            }))
+    });
     let header = if let Some(width) = width {
         header.w(px(width)).flex_shrink_0().pl_2()
     } else {
         header.flex_1().pl_2()
     };
 
+    let header = match column {
+        SortColumn::Name => header,
+        SortColumn::Type => header.child(column_resize_handle(
+            pane_index,
+            0,
+            width.unwrap_or(130.0),
+            70.0,
+            420.0,
+            cx,
+        )),
+        SortColumn::Size => header.child(column_resize_handle(
+            pane_index,
+            1,
+            width.unwrap_or(90.0),
+            64.0,
+            260.0,
+            cx,
+        )),
+        SortColumn::Modified => header.child(column_resize_handle(
+            pane_index,
+            2,
+            width.unwrap_or(126.0),
+            96.0,
+            300.0,
+            cx,
+        )),
+    };
+
+    let menu_view = cx.entity().downgrade();
     header
         .hover(|style| style.cursor_pointer().bg(rgb(theme.hover)))
         .on_click(cx.listener(move |this, _, _, cx| {
             this.sort_by(column, cx);
         }))
+        .on_drag(
+            ColumnDrag {
+                pane_index,
+                column,
+                label: label.to_owned(),
+                theme,
+            },
+            |drag, _, _, cx| cx.new(|_| drag.clone()),
+        )
+        .on_drop(cx.listener(move |manager, drag: &ColumnDrag, _, cx| {
+            cx.stop_propagation();
+            if drag.pane_index == pane_index {
+                manager.move_browser_column(pane_index, drag.column, column, cx);
+            }
+        }))
+        .context_menu(move |menu, _, _| {
+            let columns = [
+                (SortColumn::Name, "NAME", true),
+                (SortColumn::Type, "TYPE", false),
+                (SortColumn::Size, "SIZE", false),
+                (SortColumn::Modified, "MODIFIED", false),
+            ];
+            let mut menu = menu.min_w(px(190.0));
+            for (column, label, required) in columns {
+                let column_index = sort_column_index(column);
+                let view = menu_view.clone();
+                menu = menu.item(
+                    gpui::component::menu::PopupMenuItem::new(language.text(label))
+                        .checked(visible_columns[column_index])
+                        .disabled(required)
+                        .on_click(move |_, _, cx| {
+                            if required {
+                                return;
+                            }
+                            let _ = view.update(cx, |manager, cx| {
+                                if let Some(pane) = manager.browsers.get_mut(pane_index) {
+                                    if let Some(tab) = pane.tabs.get_mut(pane.active_tab) {
+                                        tab.visible_columns[column_index] =
+                                            !tab.visible_columns[column_index];
+                                        cx.notify();
+                                    }
+                                }
+                            });
+                        }),
+                );
+            }
+            menu
+        })
 }
 
-fn search_results_skeleton(theme: Theme) -> impl IntoElement {
+fn column_resize_handle(
+    pane_index: usize,
+    width_index: usize,
+    initial_width: f32,
+    min_width: f32,
+    max_width: f32,
+    cx: &mut Context<ArchiveManager>,
+) -> impl IntoElement {
+    let id = format!("column-resize-{pane_index}-{width_index}");
+    let selector = id.clone();
+    gpui::component::resizable::resize_handle::<ColumnResizeDrag, ColumnResizeDrag>(
+        id,
+        gpui::Axis::Horizontal,
+    )
+    .debug_selector(move || selector.clone())
+    .inside(gpui::component::resizable::HandleEdge::Trailing)
+    .on_mouse_down(
+        gpui::MouseButton::Left,
+        cx.listener(|manager, event: &gpui::MouseDownEvent, _, cx| {
+            manager.column_resize_start_x = Some(event.position.x);
+            cx.notify();
+        }),
+    )
+    .on_mouse_up(gpui::MouseButton::Left, cx.listener(|manager, _, _, cx| {
+        manager.column_resize_start_x = None;
+        cx.notify();
+    }))
+    .on_drag(
+        ColumnResizeDrag {
+            pane_index,
+            width_index,
+            start_x: px(0.0),
+            initial_width,
+            min_width,
+            max_width,
+        },
+        |drag, _, window, cx| {
+            cx.new(|_| ColumnResizeDrag {
+                start_x: window.mouse_position().x,
+                ..*drag
+            })
+        },
+    )
+}
+
+fn search_results_skeleton(
+    theme: Theme,
+    column_order: [SortColumn; 4],
+    visible_columns: [bool; 4],
+    column_widths: [f32; 3],
+) -> impl IntoElement {
     div()
         .id("search-results-skeleton")
         .debug_selector(|| "search-results-skeleton".to_owned())
@@ -1528,47 +1770,112 @@ fn search_results_skeleton(theme: Theme) -> impl IntoElement {
                 } else {
                     theme.surface
                 }))
-                .child(
-                    gpui::base::TableCell::new("search-loading-name", 0)
-                        .flex()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .items_center()
-                        .gap_2()
-                        .overflow_hidden()
-                        .child(inspector::skeleton_bar(theme, 16.0, 16.0))
-                        .child(inspector::skeleton_bar(
-                            theme,
-                            164.0 + (index % 4) as f32 * 24.0,
-                            9.0,
-                        )),
-                )
-                .child(
-                    gpui::base::TableCell::new("search-loading-type", 1)
-                        .w(px(130.0))
-                        .flex_shrink_0()
-                        .pl_2()
-                        .child(inspector::skeleton_bar(
-                            theme,
-                            36.0 + (index % 3) as f32 * 8.0,
-                            9.0,
-                        )),
-                )
-                .child(
-                    gpui::base::TableCell::new("search-loading-size", 2)
-                        .w(px(90.0))
-                        .flex_shrink_0()
-                        .pl_2()
-                        .child(inspector::skeleton_bar(
-                            theme,
-                            44.0 + (index % 2) as f32 * 8.0,
-                            9.0,
-                        )),
-                )
+                .children(column_order.iter().copied()
+                    .filter(|column| visible_columns[sort_column_index(*column)])
+                    .enumerate()
+                    .map(|(column_index, column)| {
+                    match column {
+                        SortColumn::Name => gpui::base::TableCell::new("search-loading-name", column_index)
+                            .flex().flex_1().min_w(px(0.0)).items_center().gap_2().overflow_hidden()
+                            .child(inspector::skeleton_bar(theme, 16.0, 16.0))
+                            .child(inspector::skeleton_bar(theme, 164.0 + (index % 4) as f32 * 24.0, 9.0))
+                            .into_any_element(),
+                        SortColumn::Type => gpui::base::TableCell::new("search-loading-type", column_index)
+                            .w(px(column_widths[0])).flex_shrink_0().pl_2()
+                            .child(inspector::skeleton_bar(theme, 36.0 + (index % 3) as f32 * 8.0, 9.0))
+                            .into_any_element(),
+                        SortColumn::Size => gpui::base::TableCell::new("search-loading-size", column_index)
+                            .w(px(column_widths[1])).flex_shrink_0().pl_2()
+                            .child(inspector::skeleton_bar(theme, 44.0 + (index % 2) as f32 * 8.0, 9.0))
+                            .into_any_element(),
+                        SortColumn::Modified => gpui::base::TableCell::new("search-loading-modified", column_index)
+                            .w(px(column_widths[2])).flex_shrink_0().pl_2()
+                            .child(inspector::skeleton_bar(theme, 82.0, 9.0))
+                            .into_any_element(),
+                    }
+                }))
         }))
 }
 
 /// Renders a file-list row with preview, open, selection, and context-menu actions.
+fn file_row_cell(
+    column: SortColumn,
+    column_index: usize,
+    entry: &ArchiveEntry,
+    kind: &str,
+    icon: &str,
+    selected: bool,
+    folder_size_known: bool,
+    widths: [f32; 3],
+    theme: Theme,
+) -> gpui::AnyElement {
+    match column {
+        SortColumn::Name => gpui::base::TableCell::new("entry-name", column_index)
+            .flex()
+            .flex_1()
+            .min_w(px(0.0))
+            .items_center()
+            .gap_2()
+            .child(app_icon(
+                icon,
+                16.0,
+                if entry.is_directory || selected { theme.accent } else { theme.icon },
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .text_color(rgb(theme.text))
+                    .child(entry.name.clone()),
+            )
+            .into_any_element(),
+        SortColumn::Type => gpui::base::TableCell::new("entry-type", column_index)
+            .w(px(widths[0]))
+            .flex_shrink_0()
+            .pl_2()
+            .child(
+                Button::new("entry-type-value")
+                    .ghost()
+                    .xsmall()
+                    .w_full()
+                    .h(px(20.0))
+                    .text_color(rgb(theme.muted_text))
+                    .tooltip(kind.to_owned())
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .child(kind.to_owned()),
+                    ),
+            )
+            .into_any_element(),
+        SortColumn::Size => gpui::base::TableCell::new("entry-size", column_index)
+            .w(px(widths[1]))
+            .flex_shrink_0()
+            .pl_2()
+            .text_color(rgb(theme.muted_text))
+            .child(if entry.is_directory && !folder_size_known {
+                "-".to_owned()
+            } else {
+                format_size(entry.size)
+            })
+            .into_any_element(),
+        SortColumn::Modified => gpui::base::TableCell::new("entry-modified", column_index)
+            .w(px(widths[2]))
+            .flex_shrink_0()
+            .pl_2()
+            .text_color(rgb(theme.muted_text))
+            .child(
+                entry
+                    .modified
+                    .map_or_else(|| "—".to_owned(), |date| date.format("%Y-%m-%d").to_string()),
+            )
+            .into_any_element(),
+    }
+}
+
 fn file_row(
     entry: &ArchiveEntry,
     archive_path: Option<&Path>,
@@ -1580,6 +1887,9 @@ fn file_row(
     folder_size_known: bool,
     row_index: usize,
     pane_index: usize,
+    column_order: [SortColumn; 4],
+    visible_columns: [bool; 4],
+    column_widths: [f32; 3],
     show_bottom_drop_border: bool,
     theme: Theme,
     drop_enabled: bool,
@@ -1639,6 +1949,24 @@ fn file_row(
             && (target.archive_entry.is_none() || target.is_directory));
     let menu_view = cx.entity().downgrade();
     let striped = row_index % 2 == 1;
+    let cells = column_order
+        .into_iter()
+        .filter(|column| visible_columns[sort_column_index(*column)])
+        .enumerate()
+        .map(|(column_index, column)| {
+            file_row_cell(
+                column,
+                column_index,
+                entry,
+                &kind,
+                icon,
+                selected,
+                folder_size_known,
+                column_widths,
+                theme,
+            )
+        })
+        .collect::<Vec<_>>();
     gpui::base::TableRow::new(gpui::SharedString::from(entry_name.clone()), row_index)
         .debug_selector({
             let name = entry_name.clone();
@@ -1755,51 +2083,7 @@ fn file_row(
                 },
             ))
         })
-        .child(
-            gpui::base::TableCell::new("entry-name", 0)
-                .flex()
-                .flex_1()
-                .min_w(px(0.0))
-                .items_center()
-                .gap_2()
-                .child(app_icon(
-                    icon,
-                    16.0,
-                    if is_directory || selected {
-                        theme.accent
-                    } else {
-                        theme.icon
-                    },
-                ))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .truncate()
-                        .text_color(rgb(theme.text))
-                        .child(entry.name.clone()),
-                ),
-        )
-        .child(
-            gpui::base::TableCell::new("entry-type", 1)
-                .w(px(130.0))
-                .flex_shrink_0()
-                .pl_2()
-                .text_color(rgb(theme.muted_text))
-                .child(kind),
-        )
-        .child(
-            gpui::base::TableCell::new("entry-size", 2)
-                .w(px(90.0))
-                .flex_shrink_0()
-                .pl_2()
-                .text_color(rgb(theme.muted_text))
-                .child(if entry.is_directory && !folder_size_known {
-                    "-".to_owned()
-                } else {
-                    format_size(entry.size)
-                }),
-        )
+        .children(cells)
         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
             if event.click_count() != 2 {
                 this.selected_entry = Some(click_target.key.clone());
@@ -1825,6 +2109,15 @@ fn file_row(
                 .unwrap_or(true);
             file_actions::menu(menu, &target, menu_view.clone(), language, busy, cx)
         })
+}
+
+fn sort_column_index(column: SortColumn) -> usize {
+    match column {
+        SortColumn::Name => 0,
+        SortColumn::Type => 1,
+        SortColumn::Size => 2,
+        SortColumn::Modified => 3,
+    }
 }
 
 /// Maps a filename extension to the corresponding bundled file-type icon.

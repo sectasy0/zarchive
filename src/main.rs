@@ -181,6 +181,7 @@ struct ArchiveManager {
     browsers: Vec<BrowserPane>,
     active_browser: usize,
     inspector_focus: bool,
+    column_resize_start_x: Option<gpui::Pixels>,
     content_focus: FocusHandle,
     opened_files: Vec<NamedTempFile>,
     status_message: Option<String>,
@@ -228,6 +229,9 @@ struct BrowserTab {
     selected_entry: Option<String>,
     sort_column: SortColumn,
     sort_ascending: bool,
+    column_order: [SortColumn; 4],
+    visible_columns: [bool; 4],
+    column_widths: [f32; 3],
     directory_sizes: Option<BTreeMap<String, u64>>,
     directory_size_task: Option<u64>,
     directory_size_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -266,6 +270,14 @@ impl BrowserTab {
             selected_entry: None,
             sort_column: SortColumn::Name,
             sort_ascending: true,
+            column_order: [
+                SortColumn::Name,
+                SortColumn::Type,
+                SortColumn::Size,
+                SortColumn::Modified,
+            ],
+            visible_columns: [true; 4],
+            column_widths: [110.0, 76.0, 108.0],
             directory_sizes: None,
             directory_size_task: None,
             directory_size_cancel: None,
@@ -393,6 +405,33 @@ impl ArchiveManager {
         let pane_index = self.active_browser;
         let tab_index = self.browsers[pane_index].active_tab;
         self.close_browser_tab(pane_index, tab_index, cx);
+    }
+
+    fn move_browser_column(
+        &mut self,
+        pane_index: usize,
+        source: SortColumn,
+        target: SortColumn,
+        cx: &mut Context<Self>,
+    ) {
+        if source == target || pane_index >= self.browsers.len() {
+            return;
+        }
+        let active_tab = self.browsers[pane_index].active_tab;
+        let order = &mut self.browsers[pane_index].tabs[active_tab].column_order;
+        let Some(source_index) = order.iter().position(|column| *column == source) else {
+            return;
+        };
+        let Some(target_index) = order.iter().position(|column| *column == target) else {
+            return;
+        };
+        if source_index < target_index {
+            order[source_index..=target_index].rotate_left(1);
+        } else {
+            order[target_index..=source_index].rotate_right(1);
+        }
+        self.active_browser = pane_index;
+        cx.notify();
     }
 }
 
@@ -914,6 +953,7 @@ fn main() {
                             browsers,
                             active_browser: 0,
                             inspector_focus: false,
+                            column_resize_start_x: None,
                             password_prompt: password::PasswordPrompt::new(
                                 cx,
                                 initial_password_archive,
@@ -1051,6 +1091,7 @@ mod tests {
             browsers,
             active_browser: 0,
             inspector_focus: false,
+            column_resize_start_x: None,
             content_focus: cx.focus_handle(),
             opened_files: Vec::new(),
             status_message: None,
@@ -1566,10 +1607,10 @@ mod tests {
     #[gpui::test]
     /// Filters visible rows case-insensitively as the toolbar search query changes.
     fn toolbar_search_filters_file_rows_case_insensitively(cx: &mut gpui::TestAppContext) {
-        use gpui::test::TestWindowExt;
         let (view, cx) = component_window(cx, |_, cx| test_manager(cx));
-
-        cx.update(|window, cx| window.click("toolbar-search-input", cx));
+        cx.update(|window, cx| {
+            view.update(cx, |manager, cx| window.focus(&manager.content_focus, cx));
+        });
         cx.simulate_keystrokes("BETA");
         cx.run_until_parked();
 
@@ -1713,6 +1754,100 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("file:docs").is_some());
         assert!(cx.debug_bounds("file:./docs/deep/Needle.TXT").is_none());
+    }
+
+    #[gpui::test]
+    fn browser_column_resize_is_independent_per_pane(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = component_window(cx, |_, cx| test_manager(cx));
+        let start = cx.debug_bounds("column-resize-0-0").unwrap().center();
+        cx.simulate_mouse_move(start, None, gpui::Modifiers::default());
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+        let end = start + gpui::point(gpui::px(36.0), gpui::px(0.0));
+        cx.simulate_mouse_move(
+            start + gpui::point(gpui::px(8.0), gpui::px(0.0)),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.simulate_mouse_move(end, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert!(manager.browsers[0].tabs[0].column_widths[0] > 110.0);
+            assert_eq!(manager.browsers[1].tabs[0].column_widths[0], 110.0);
+        });
+    }
+
+    #[gpui::test]
+    fn browser_columns_can_be_reordered_by_dragging_headers(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = component_window(cx, |_, cx| test_manager(cx));
+        let start = cx.debug_bounds("sort-type").unwrap().center();
+        let target_bounds = cx.debug_bounds("sort-modified").unwrap();
+        let target = target_bounds.center();
+        cx.simulate_mouse_move(start, None, gpui::Modifiers::default());
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(gpui::px(10.0), gpui::px(0.0)),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.simulate_mouse_move(target, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let manager = view.read(cx);
+            let dark = manager.theme_mode.is_dark(window.appearance());
+            let accent = manager.accent_color.color(dark);
+            let target_left = f32::from(target_bounds.left()) * window.scale_factor();
+            let target_right = f32::from(target_bounds.right()) * window.scale_factor();
+            let target_top = f32::from(target_bounds.top()) * window.scale_factor();
+            let target_bottom = f32::from(target_bounds.bottom()) * window.scale_factor();
+            assert!(window.painted_quads().iter().any(|quad| {
+                quad.border_color == gpui::rgb(accent).into()
+                    && quad.bounds.origin.x.0 <= target_left + 1.0
+                    && quad.bounds.right().0 >= target_right - 1.0
+                    && quad.bounds.origin.y.0 <= target_top + 1.0
+                    && quad.bounds.bottom().0 >= target_bottom - 1.0
+            }), "the column under the dragged header must show an accent border");
+        });
+        cx.simulate_mouse_up(target, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert_eq!(
+                view.read(cx).browsers[0].tabs[0].column_order,
+                [
+                    SortColumn::Name,
+                    SortColumn::Size,
+                    SortColumn::Modified,
+                    SortColumn::Type,
+                ],
+            );
+        });
+        let type_header = cx.debug_bounds("sort-type").unwrap();
+        let modified_header = cx.debug_bounds("sort-modified").unwrap();
+        assert!(type_header.origin.x > modified_header.origin.x);
+    }
+
+    #[gpui::test]
+    fn hiding_browser_columns_updates_only_the_active_pane(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = component_window(cx, |_, cx| test_manager(cx));
+        view.update(cx, |manager, cx| {
+            manager.active_browser_tab_mut().visible_columns[1] = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds("sort-type").is_none());
+        assert!(cx.debug_bounds("sort-name").is_some());
+        assert!(cx.debug_bounds("sort-type-secondary").is_some());
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert!(!manager.browsers[0].tabs[0].visible_columns[1]);
+            assert!(manager.browsers[1].tabs[0].visible_columns[1]);
+        });
     }
 
     #[gpui::test]

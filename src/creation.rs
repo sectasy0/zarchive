@@ -56,6 +56,7 @@ pub(crate) struct ArchiveCreationForm {
     custom_volume_size: String,
     volume_input: Option<Entity<InputState>>,
     volume_subscription: Option<Subscription>,
+    source_input: Option<Entity<InputState>>,
 }
 
 impl ArchiveCreationForm {
@@ -92,6 +93,7 @@ impl ArchiveCreationForm {
             custom_volume_size: "100".to_owned(),
             volume_input: None,
             volume_subscription: None,
+            source_input: None,
         }
     }
 
@@ -160,6 +162,9 @@ impl ArchiveCreationForm {
             ChoiceField::RecoveryPercent => self.parity_percent = index,
         }
         self.error = None;
+        if field == ChoiceField::Format && self.options.format.is_single_compressed() {
+            self.normalize_single_compressed_sources();
+        }
     }
 
     fn recovery_percent(&self) -> u32 {
@@ -195,12 +200,41 @@ impl ArchiveCreationForm {
     }
 
     fn validate_sources(&self, format: ResolvedFormat) -> Result<(), &'static str> {
+        if format.is_single_compressed() {
+            if self.sources.len() != 1 {
+                return Err("Compression streams require exactly one file.");
+            }
+            if !self.sources[0].is_file() {
+                return Err("Compression streams require one file and cannot be created from folders.");
+            }
+        }
         if format == ResolvedFormat::Ar && self.sources.iter().any(|source| source.is_dir()) {
             return Err(
                 "AR archives support files only. Select individual files instead of folders.",
             );
         }
         Ok(())
+    }
+
+    pub(crate) fn normalize_single_compressed_sources(&mut self) {
+        if self.sources.is_empty() {
+            return;
+        }
+        if let Some(source) = self.sources.iter().find(|source| source.is_file()).cloned() {
+            if self.sources.len() != 1 || self.sources.first() != Some(&source) {
+                self.sources = vec![source];
+                self.error = Some(
+                    "Compression streams support one file. The first selected file was kept; other selections were removed."
+                        .to_owned(),
+                );
+            }
+        } else {
+            self.sources.clear();
+            self.error = Some(
+                "Compression streams require one file and cannot be created from folders."
+                    .to_owned(),
+            );
+        }
     }
 
     /// Validates required encryption credentials and their confirmation.
@@ -236,45 +270,82 @@ fn parse_volume_size(text: &str, unit: usize) -> Result<u64, &'static str> {
 }
 
 pub(crate) fn prepare(manager: &mut ArchiveManager, window: &mut Window, cx: &mut Context<ArchiveManager>) {
+    let language = manager.language;
     let form = &mut manager.creation;
     if let Some(state) = &form.volume_input {
         if state.read(cx).value().as_ref() != form.custom_volume_size {
             state.update(cx, |state, cx| state.set_value(form.custom_volume_size.clone(), window, cx));
         }
-        return;
+    } else {
+        let state = cx.new(|cx| InputState::new(window, cx).default_value(form.custom_volume_size.clone()));
+        let subscription = cx.subscribe_in(&state, window, |this, state, event, _, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.creation.custom_volume_size = state.read(cx).value().to_string();
+                this.creation.error = None;
+                cx.notify();
+            }
+        });
+        form.volume_input = Some(state);
+        form.volume_subscription = Some(subscription);
     }
-    let state = cx.new(|cx| InputState::new(window, cx).default_value(form.custom_volume_size.clone()));
-    let subscription = cx.subscribe_in(&state, window, |this, state, event, _, cx| {
-        if matches!(event, InputEvent::Change) {
-            this.creation.custom_volume_size = state.read(cx).value().to_string();
-            this.creation.error = None;
-            cx.notify();
+
+    let source_value = form
+        .sources
+        .first()
+        .map_or_else(String::new, |source| source.display().to_string());
+    if let Some(state) = &form.source_input {
+        if state.read(cx).value().as_ref() != source_value {
+            state.update(cx, |state, cx| state.set_value(source_value, window, cx));
         }
-    });
-    form.volume_input = Some(state);
-    form.volume_subscription = Some(subscription);
+    } else {
+        let state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(language.text("No file selected"))
+                .default_value(source_value)
+        });
+        form.source_input = Some(state);
+    }
 }
 
 impl ArchiveManager {
     /// Opens a system picker and adds unique files or folders to the form.
     fn add_archive_sources(&mut self, folders: bool, cx: &mut Context<Self>) {
-        let mut dialog = rfd::FileDialog::new().set_title(self.language.text(if folders {
+        let single_compressed = self.creation.options.format.is_single_compressed();
+        if folders && single_compressed {
+            self.creation.error = Some(
+                self.language
+                    .text("Compression streams require one file and cannot be created from folders.")
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let title = if folders {
             "Select folders to archive"
+        } else if single_compressed {
+            "Choose file"
         } else {
             "Select files to archive"
-        }));
+        };
+        let mut dialog = rfd::FileDialog::new().set_title(self.language.text(title));
         if let Some(directory) = &self.current_directory {
             dialog = dialog.set_directory(directory);
         }
         let paths = if folders {
             dialog.pick_folders()
+        } else if single_compressed {
+            dialog.pick_file().map(|path| vec![path])
         } else {
             dialog.pick_files()
         };
         if let Some(paths) = paths {
-            for path in paths {
-                if !self.creation.sources.contains(&path) {
-                    self.creation.sources.push(path);
+            if single_compressed {
+                self.creation.sources = paths;
+            } else {
+                for path in paths {
+                    if !self.creation.sources.contains(&path) {
+                        self.creation.sources.push(path);
+                    }
                 }
             }
             self.creation.error = None;
@@ -541,6 +612,89 @@ pub(crate) fn view(
                 ),
         );
     }
+    let source_controls = if form.options.format.is_single_compressed() {
+        div()
+            .id("single-compressed-source")
+            .debug_selector(|| "single-compressed-source".to_owned())
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .id("creation-single-source-input")
+                    .debug_selector(|| "creation-single-source-input".to_owned())
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(
+                        Input::new(form.source_input.as_ref().expect("source input prepared"))
+                            .id("creation-single-source-value")
+                            .small()
+                            .w_full()
+                            .disabled(true)
+                            .aria_label(language.text("Selected file")),
+                    ),
+            )
+            .child(
+                toolbar_button(
+                    "choose-compressed-source",
+                    "documents",
+                    language.text("Choose file"),
+                    theme,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.add_archive_sources(false, cx))),
+            )
+            .child(
+                Button::new("remove-compressed-source")
+                    .ghost()
+                    .xsmall()
+                    .icon(gpui::assets::IconName::X)
+                    .tooltip(language.text("Remove"))
+                    .accessibility_label(language.text("Remove"))
+                    .disabled(form.sources.is_empty())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.creation.sources.clear();
+                        this.creation.error = None;
+                        cx.notify();
+                    })),
+            )
+    } else {
+        div()
+            .id("archive-source-list-controls")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        toolbar_button(
+                            "add-archive-files",
+                            "documents",
+                            language.text("Add files"),
+                            theme,
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.add_archive_sources(false, cx)
+                        })),
+                    )
+                    .child(
+                        toolbar_button(
+                            "add-archive-folders",
+                            "folder",
+                            language.text("Add folders"),
+                            theme,
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.add_archive_sources(true, cx)
+                        })),
+                    ),
+            )
+            .child(sources)
+    };
     div()
         .flex()
         .flex_col()
@@ -552,32 +706,7 @@ pub(crate) fn view(
             }),
         )
         .child(language.text("Sources"))
-        .child(
-            div()
-                .flex()
-                .gap_2()
-                .child(
-                    toolbar_button(
-                        "add-archive-files",
-                        "documents",
-                        language.text("Add files"),
-                        theme,
-                        cx,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.add_archive_sources(false, cx))),
-                )
-                .child(
-                    toolbar_button(
-                        "add-archive-folders",
-                        "folder",
-                        language.text("Add folders"),
-                        theme,
-                        cx,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.add_archive_sources(true, cx))),
-                ),
-        )
-        .child(sources)
+        .child(source_controls)
         .child(language.text("Format"))
         .child(choice_view(ChoiceField::Format, manager, theme, cx))
         .when(
@@ -776,7 +905,7 @@ pub(crate) fn view(
             this.child(
                 div()
                     .text_xs()
-                    .text_color(rgb(theme.text))
+                    .text_color(rgb(0xef4444))
                     .child(language.error_message(error)),
             )
         })
@@ -1077,6 +1206,94 @@ mod tests {
     }
 
     #[gpui::test]
+    fn single_compressed_creation_keeps_one_file_and_rejects_folders(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        let first = directory.path().join("first.txt");
+        let second = directory.path().join("second.txt");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&second, b"second").unwrap();
+        let gzip_index = ResolvedFormat::CREATION_FORMATS
+            .iter()
+            .position(|format| *format == ResolvedFormat::Gzip)
+            .unwrap();
+        let (view, cx) = crate::tests::component_window(cx, |window, cx| {
+            let mut manager = crate::tests::test_manager(cx);
+            manager.current_directory = None;
+            manager.creation.sources = vec![folder.clone(), first.clone(), second.clone()];
+            manager.show_modal(Modal::CreateArchive, window, cx);
+            manager.creation.apply(ChoiceField::Format, gzip_index);
+            manager
+        });
+
+        assert!(cx.debug_bounds("add-archive-folders").is_none());
+        assert!(cx.debug_bounds("creation-single-source-input").is_some());
+        assert!(cx.debug_bounds("archive-sources").is_none());
+        cx.read(|cx| {
+            let form = &view.read(cx).creation;
+            assert_eq!(form.sources, [first.clone()]);
+            assert_eq!(
+                form.source_input.as_ref().unwrap().read(cx).value().to_string(),
+                first.display().to_string()
+            );
+            assert_eq!(
+                form.error.as_deref(),
+                Some("Compression streams support one file. The first selected file was kept; other selections were removed.")
+            );
+        });
+
+        cx.update(|window, cx| {
+            view.update(cx, |manager, cx| {
+                manager.receive_external_paths(
+                    &[folder.clone(), second.clone(), first.clone()],
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.read(|cx| {
+            let form = &view.read(cx).creation;
+            assert_eq!(form.sources, [second.clone()]);
+            assert_eq!(
+                form.error.as_deref(),
+                Some("Compression streams support one file. The first selected file was kept; other selections were removed.")
+            );
+        });
+
+        cx.update(|window, cx| {
+            view.update(cx, |manager, cx| {
+                manager.receive_external_paths(&[folder.clone()], window, cx);
+            });
+        });
+        cx.read(|cx| {
+            let form = &view.read(cx).creation;
+            assert_eq!(form.sources, [second.clone()]);
+            assert_eq!(
+                form.error.as_deref(),
+                Some("Compression streams require one file and cannot be created from folders.")
+            );
+        });
+
+        cx.update(|window, cx| {
+            view.update(cx, |manager, cx| {
+                manager.creation.sources.clear();
+                manager.receive_external_paths(&[folder.clone()], window, cx);
+            });
+        });
+        cx.read(|cx| {
+            let form = &view.read(cx).creation;
+            assert!(form.sources.is_empty());
+            assert_eq!(
+                form.error.as_deref(),
+                Some("Compression streams require one file and cannot be created from folders.")
+            );
+        });
+    }
+
+    #[gpui::test]
     /// Shows a separate compression-method selector only for the logical TAR format.
     fn tar_creation_form_shows_methods_only_for_tar(cx: &mut gpui::TestAppContext) {
         let (view, cx) = crate::tests::component_window(cx, |window, cx| {
@@ -1247,6 +1464,11 @@ mod tests {
                 view.read(cx).creation.options.format,
                 ResolvedFormat::SevenZip
             )
+        });
+        view.update(cx, |manager, cx| {
+            manager.creation.sources = vec![source.clone()];
+            manager.creation.error = None;
+            cx.notify();
         });
         let trigger = cx.debug_bounds("creation-compression").unwrap();
         cx.simulate_mouse_move(trigger.center(), None, Modifiers::default());

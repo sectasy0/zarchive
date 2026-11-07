@@ -294,6 +294,11 @@ Creating or updating RAR requires the external `rar` command-line tool on
 updates to encrypted RAR archives are not supported.
 Standalone compression streams such as `.gz` and `.zst` contain one file and
 cannot accept additional files; use a TAR archive with that compression instead.
+When creating a standalone stream, the creation dialog switches to a single-file
+picker and hides folder selection. If the format is changed while multiple
+sources are selected, the first file is kept and the other selections are
+removed with a warning. If the selection contains only folders, it is cleared
+and the dialog asks for a file.
 
 ### Priority 2: Compression Formats
 

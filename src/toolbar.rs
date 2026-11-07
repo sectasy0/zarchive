@@ -407,6 +407,43 @@ impl ArchiveManager {
     }
 }
 
+pub(crate) fn type_to_search(
+    manager: &mut ArchiveManager,
+    event: &gpui::KeyDownEvent,
+    window: &mut Window,
+    cx: &mut Context<ArchiveManager>,
+) {
+    if manager.modal.is_some()
+        || manager.inspector_focus
+        || !manager.content_focus.is_focused(window)
+        || event.keystroke.key == "space"
+        || event.keystroke.modifiers.control
+        || event.keystroke.modifiers.alt
+        || event.keystroke.modifiers.platform
+        || event.keystroke.modifiers.function
+    {
+        return;
+    }
+    let Some(character) = event
+        .keystroke
+        .key_char
+        .as_deref()
+        .filter(|character| !character.is_empty() && !character.chars().all(char::is_control))
+    else {
+        return;
+    };
+    let search_focus = manager.toolbar_search.focus_handle(cx);
+    if search_focus.is_focused(window) {
+        return;
+    }
+    let mut query = manager.toolbar_search.draft.clone();
+    query.push_str(character);
+    manager.filters.visible = true;
+    manager.set_search_query(query, window, cx);
+    window.focus(&search_focus, cx);
+    cx.stop_propagation();
+}
+
 fn refresh_archive_search(manager: &mut ArchiveManager, _window: &Window, cx: &mut Context<ArchiveManager>) {
     let query = manager.toolbar_search.query.clone();
     let parsed = crate::filters::parse_search(&query);

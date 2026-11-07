@@ -91,6 +91,8 @@ pub(crate) enum SortColumn {
     Type,
     /// Sorts by the reported or calculated entry size.
     Size,
+    /// Sorts by modification date.
+    Modified,
 }
 
 /// Builds a sorted list of unique archive folders with their display depths.
@@ -231,6 +233,7 @@ pub(crate) fn sort_entries(entries: &mut [ArchiveEntry], column: SortColumn, asc
                 SortColumn::Name => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
                 SortColumn::Type => sortable_type(left).cmp(&sortable_type(right)),
                 SortColumn::Size => left.size.cmp(&right.size),
+                SortColumn::Modified => left.modified.cmp(&right.modified),
             };
             if order == std::cmp::Ordering::Equal {
                 left.name.to_lowercase().cmp(&right.name.to_lowercase())
@@ -673,3 +676,31 @@ mod tests {
         assert!(entries.iter().all(|entry| entry.source_path.is_some()));
     }
 }
+
+    #[test]
+    fn sorts_modification_dates_chronologically() {
+        let earlier = chrono::NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
+        let later = chrono::NaiveDate::from_ymd_opt(2025, 6, 20).unwrap();
+        let mut entries = vec![
+            ArchiveEntry {
+                name: "later.txt".into(),
+                source_path: None,
+                size: 1,
+                modified: Some(later),
+                is_directory: false,
+                is_encrypted: false,
+            },
+            ArchiveEntry {
+                name: "earlier.txt".into(),
+                source_path: None,
+                size: 1,
+                modified: Some(earlier),
+                is_directory: false,
+                is_encrypted: false,
+            },
+        ];
+        sort_entries(&mut entries, SortColumn::Modified, true);
+        assert_eq!(entries[0].name, "earlier.txt");
+        sort_entries(&mut entries, SortColumn::Modified, false);
+        assert_eq!(entries[0].name, "later.txt");
+    }
