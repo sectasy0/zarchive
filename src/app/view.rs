@@ -35,9 +35,9 @@ impl Render for ArchiveManager {
                     .and_then(Path::file_name)
                     .and_then(|name| name.to_str())
             })
-            .unwrap_or(language.text("File Browser"));
+            .unwrap_or(language.text("File Browser"))
+            .to_owned();
         let folders = folder_tree(&self.entries);
-        let search_query = self.toolbar_search.text_query();
         let visible_entries = self.visible_browser_entries();
         let item_count = visible_entries.len();
         let location_size = self
@@ -122,9 +122,6 @@ impl Render for ArchiveManager {
         } else {
             0x854d0e
         };
-        let background_menu_view = cx.entity().downgrade();
-        let can_create_here = self.current_directory.is_some() && self.creation_task.is_none();
-
         let mut folder_tree_view = div()
             .id("folder-tree")
             .flex()
@@ -139,7 +136,7 @@ impl Render for ArchiveManager {
 
         if self.archive_name.is_some() && self.error.is_none() {
             folder_tree_view = folder_tree_view.child(folder_row(
-                location_title,
+                &location_title,
                 "",
                 0,
                 &self.selected_folder,
@@ -164,7 +161,7 @@ impl Render for ArchiveManager {
             }
         } else if let Some(directory) = &self.current_directory {
             folder_tree_view = folder_tree_view.child(folder_row(
-                location_title,
+                &location_title,
                 "",
                 0,
                 "",
@@ -191,6 +188,16 @@ impl Render for ArchiveManager {
             }
         }
 
+        let original_browser = self.active_browser;
+        let mut build_file_list = |pane_index| {
+        self.active_browser = pane_index;
+        let file_list_id = if pane_index == 0 { "file-list" } else { "file-list-secondary" };
+        let item_list_id = if pane_index == 0 { "file-list-items" } else { "file-list-items-secondary" };
+        let background_menu_view = cx.entity().downgrade();
+        let can_create_here = self.current_directory.is_some() && self.creation_task.is_none();
+        let search_query = self.toolbar_search.text_query();
+        let visible_entries = self.visible_browser_entries();
+        let item_count = visible_entries.len();
         let archive_path = self.archive_path.clone();
         let current_directory = self.current_directory.clone();
         let archive_password = self.archive_password.clone();
@@ -198,8 +205,8 @@ impl Render for ArchiveManager {
         let selected_entry = self.selected_entry.clone();
         let file_list =
             if self.error.is_some() {
-                gpui::base::TableBody::new("file-list")
-                    .debug_selector(|| "file-list".to_owned())
+                gpui::base::TableBody::new(file_list_id)
+                    .debug_selector(move || file_list_id.to_owned())
                     .flex()
                     .flex_col()
                     .flex_1()
@@ -226,8 +233,8 @@ impl Render for ArchiveManager {
                     })
                     .into_any_element()
             } else if visible_entries.is_empty() && self.toolbar_search.is_searching() {
-                gpui::base::TableBody::new("file-list")
-                    .debug_selector(|| "file-list".to_owned())
+                gpui::base::TableBody::new(file_list_id)
+                    .debug_selector(move || file_list_id.to_owned())
                     .flex()
                     .flex_col()
                     .flex_1()
@@ -246,8 +253,8 @@ impl Render for ArchiveManager {
                     })
                     .into_any_element()
             } else if visible_entries.is_empty() {
-                gpui::base::TableBody::new("file-list")
-                    .debug_selector(|| "file-list".to_owned())
+                gpui::base::TableBody::new(file_list_id)
+                    .debug_selector(move || file_list_id.to_owned())
                     .flex()
                     .flex_col()
                     .flex_1()
@@ -292,8 +299,8 @@ impl Render for ArchiveManager {
                     })
                     .into_any_element()
             } else {
-                gpui::base::TableBody::new("file-list")
-                    .debug_selector(|| "file-list".to_owned())
+                gpui::base::TableBody::new(file_list_id)
+                    .debug_selector(move || file_list_id.to_owned())
                     .flex()
                     .flex_col()
                     .flex_1()
@@ -303,10 +310,13 @@ impl Render for ArchiveManager {
                     .bg(rgb(theme.surface))
                     .child(
                         gpui::uniform_list(
-                            "file-list-items",
+                            item_list_id,
                             item_count,
                             cx.processor(move |manager, range: std::ops::Range<usize>, _, cx| {
-                                range
+                                let previous_browser = manager.active_browser;
+                                manager.active_browser = pane_index;
+                                let drop_marker_row = manager.active_browser_tab().drop_marker_row;
+                                let rows = range
                                     .filter_map(|index| {
                                         let entry = visible_entries.get(index)?;
                                         let folder_size_known = current_directory.is_none()
@@ -325,6 +335,8 @@ impl Render for ArchiveManager {
                                                 language,
                                                 folder_size_known,
                                                 index,
+                                                pane_index,
+                                                drop_marker_row == Some(index),
                                                 theme,
                                                 manager.archive_drop_enabled(),
                                                 entry
@@ -339,7 +351,9 @@ impl Render for ArchiveManager {
                                             .into_any_element(),
                                         )
                                     })
-                                    .collect()
+                                    .collect();
+                                manager.active_browser = previous_browser;
+                                rows
                             }),
                         )
                         .track_scroll(&self.file_scroll)
@@ -359,12 +373,25 @@ impl Render for ArchiveManager {
                     })
                     .into_any_element()
             };
+            file_list
+        };
+        let file_lists = vec![build_file_list(0), build_file_list(1)];
+        drop(build_file_list);
+        self.active_browser = original_browser;
+        let mut browser_panels = Vec::new();
+        for (pane_index, file_list) in file_lists.into_iter().enumerate() {
+            browser_panels.push(
+                browser_panel(self, pane_index, file_list, language, theme, cx).into_any_element(),
+            );
+        }
 
         div()
             .id("archive-manager")
             .on_drag_move::<inspector::PreviewResize>(cx.listener(inspector::resize_preview))
             .track_focus(&self.content_focus)
-            .key_context(if self.content_focus.is_focused(window) && self.modal.is_none() {
+            .key_context(if self.inspector_focus && self.inspector.visible && self.modal.is_none() {
+                "ArchiveManager Inspector"
+            } else if self.content_focus.is_focused(window) && self.modal.is_none() {
                 "ArchiveManager Browser"
             } else {
                 "ArchiveManager"
@@ -383,6 +410,14 @@ impl Render for ArchiveManager {
             }))
             .on_action(cx.listener(|this, _: &toolbar::key_actions::PreviewSelection, window, cx| {
                 this.preview_browser_selection(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &toolbar::key_actions::CloseBrowserTab, _, cx| {
+                if this.inspector_focus && this.inspector.visible {
+                    this.inspector.close_active_tab();
+                    cx.notify();
+                } else {
+                    this.close_active_browser_tab(cx);
+                }
             }))
             .on_action(
                 cx.listener(|this, _: &toolbar::key_actions::OpenFile, _, cx| {
@@ -544,98 +579,12 @@ impl Render for ArchiveManager {
                             .min_w(px(0.0))
                             .bg(rgb(theme.surface))
                             .child(
-                                gpui::base::Table::new("archive-table")
-                                    .debug_selector(|| "archive-table".to_owned())
+                                div()
+                                    .id("browser-split")
                                     .flex()
-                                    .flex_col()
                                     .flex_1()
-                                    .w_full()
                                     .min_h(px(0.0))
-                                    .overflow_hidden()
-                                    .child(
-                                        gpui::base::TableRow::new("archive-table-header", 0)
-                                            .flex()
-                                            .items_center()
-                                            .w_full()
-                                            .h(px(28.0))
-                                            .flex_shrink_0()
-                                            .pr_2()
-                                            .border_b_1()
-                                            .border_color(rgb(theme.border))
-                                            .bg(rgb(theme.sidebar))
-                                            .text_xs()
-                                            .text_color(rgb(theme.muted_text))
-                                            .child(sort_header(
-                                                language.text("NAME"),
-                                                None,
-                                                SortColumn::Name,
-                                                self.sort_column,
-                                                self.sort_ascending,
-                                                theme,
-                                                cx,
-                                            ))
-                                            .child(sort_header(
-                                                language.text("TYPE"),
-                                                Some(130.0),
-                                                SortColumn::Type,
-                                                self.sort_column,
-                                                self.sort_ascending,
-                                                theme,
-                                                cx,
-                                            ))
-                                            .child(sort_header(
-                                                language.text("SIZE"),
-                                                Some(90.0),
-                                                SortColumn::Size,
-                                                self.sort_column,
-                                                self.sort_ascending,
-                                                theme,
-                                                cx,
-                                            )),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("file-scroll-viewport")
-                                            .w_full()
-                                            .relative()
-                                            .flex()
-                                            .flex_col()
-                                            .flex_1()
-                                            .min_h(px(0.0))
-                                            .overflow_hidden()
-                                            .when_some(self.archive_path.clone(), |area, path| {
-                                                drop_service::archive_drop_area(
-                                                    area,
-                                                    file_actions::EntryTarget {
-                                                        name: self
-                                                            .archive_name
-                                                            .clone()
-                                                            .unwrap_or_default(),
-                                                        key: path.to_string_lossy().into_owned(),
-                                                        path,
-                                                        archive_entry: (!self
-                                                            .selected_folder
-                                                            .is_empty())
-                                                        .then(|| self.selected_folder.clone()),
-                                                        password: self.archive_password.clone(),
-                                                        is_directory: true,
-                                                    },
-                                                    theme,
-                                                    self.archive_drop_enabled(),
-                                                    cx,
-                                                )
-                                            })
-                                            .child(file_list)
-                                            .child(
-                                                gpui::component::scroll::Scrollbar::vertical(
-                                                    &self.file_scroll,
-                                                )
-                                                .id("file-list-scrollbar")
-                                                .mode(
-                                                    gpui::component::scroll::ScrollbarMode::Always,
-                                                ),
-                                            ),
-                                    ),
+                                    .children(browser_panels),
                             )
                             .when(self.inspector.visible, |this| {
                                 let height =
@@ -871,6 +820,471 @@ impl Render for ArchiveManager {
     }
 }
 
+fn last_visible_drop_row(
+    scroll: &gpui::UniformListScrollHandle,
+    item_count: usize,
+    y: gpui::Pixels,
+) -> Option<usize> {
+    if item_count == 0 {
+        return None;
+    }
+    let handle = &scroll.0.borrow().base_handle;
+    let viewport = handle.bounds();
+    let offset = handle.offset().y;
+    let rows_to_bottom = (f32::from(viewport.size.height - offset) / 28.0).ceil() as usize;
+    let last_visible = rows_to_bottom.saturating_sub(1).min(item_count - 1);
+    let row_bottom = viewport.top() + px((last_visible + 1) as f32 * 28.0) + offset;
+    (y > row_bottom && y < viewport.bottom()).then_some(last_visible)
+}
+
+fn browser_tab_drop_allowed(path: &Path) -> bool {
+    path.is_dir() || archive::is_supported_archive(path)
+}
+
+fn browser_tab_drop_accepts(paths: &[PathBuf]) -> bool {
+    matches!(paths, [path] if browser_tab_drop_allowed(path))
+}
+
+fn open_browser_tab_drop(
+    manager: &mut ArchiveManager,
+    pane_index: usize,
+    tab_index: usize,
+    path: PathBuf,
+    cx: &mut Context<ArchiveManager>,
+) {
+    if !browser_tab_drop_allowed(&path) {
+        return;
+    }
+    manager.active_browser = pane_index;
+    manager.browsers[pane_index].active_tab = tab_index;
+    let is_directory = path.is_dir();
+    let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let target = file_actions::EntryTarget {
+        name,
+        key: path.to_string_lossy().into_owned(),
+        path,
+        archive_entry: None,
+        password: None,
+        is_directory,
+    };
+    manager.open_entry(&target, cx);
+}
+
+fn open_browser_tab_drop_as_new(
+    manager: &mut ArchiveManager,
+    pane_index: usize,
+    path: PathBuf,
+    cx: &mut Context<ArchiveManager>,
+) {
+    if !browser_tab_drop_allowed(&path) {
+        return;
+    }
+    manager.add_browser_tab(pane_index, cx);
+    let tab_index = manager.browsers[pane_index].active_tab;
+    open_browser_tab_drop(manager, pane_index, tab_index, path, cx);
+}
+
+fn browser_panel(
+    manager: &mut ArchiveManager,
+    pane_index: usize,
+    file_list: impl IntoElement,
+    language: Language,
+    theme: Theme,
+    cx: &mut Context<ArchiveManager>,
+) -> impl IntoElement {
+    let previous_browser = manager.active_browser;
+    let focused = previous_browser == pane_index;
+    manager.active_browser = pane_index;
+    let pane = &manager.browsers[pane_index];
+    let tab_labels: Vec<_> = pane
+        .tabs
+        .iter()
+        .map(|tab| {
+            let label = tab.archive_name
+                .clone()
+                .or_else(|| {
+                    tab.current_directory
+                        .as_deref()
+                        .and_then(Path::file_name)
+                        .map(|name| name.to_string_lossy().into_owned())
+                })
+                .or_else(|| tab.current_directory.as_deref().map(|path| path.display().to_string()))
+                .unwrap_or_else(|| language.text("File Browser").to_owned());
+            let icon = if tab.archive_path.is_some() { "archive" } else { "folder" };
+            (label, icon)
+        })
+        .collect();
+    let active_tab = pane.active_tab;
+    let tab_count = pane.tabs.len();
+    let drop_enabled = manager.modal.is_none();
+    let folder_drop_view = cx.entity().downgrade();
+    let folder_drop_tab_id = manager.active_browser_tab().id;
+    let folder_drop_scroll = manager.file_scroll.clone();
+    let folder_drop_row_count = manager.visible_browser_entries().len();
+    let mut tab_items = Vec::with_capacity(tab_count);
+    for (tab_index, (label, icon)) in tab_labels.into_iter().enumerate() {
+        let selected = active_tab == tab_index;
+        let select_tab = cx.listener(move |this, _, _, cx| {
+            this.active_browser = pane_index;
+            this.browsers[pane_index].active_tab = tab_index;
+            cx.notify();
+        });
+        let tab_selector = format!("browser-tab:{pane_index}:{tab_index}");
+        let mut tab = div()
+            .id(format!("browser-tab-group-{pane_index}-{tab_index}"))
+            .debug_selector(move || tab_selector.clone())
+            .relative()
+            .flex()
+            .items_center()
+            .gap_1()
+            .min_w(px(90.0))
+            .max_w(px(180.0))
+            .h(px(30.0))
+            .flex_shrink_0()
+            .px_2()
+            .border_r_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(if selected { theme.surface } else { theme.titlebar }))
+            .text_color(rgb(if selected { theme.text } else { theme.muted_text }))
+            .text_xs()
+            .cursor_pointer()
+            .on_click(select_tab)
+            .drag_over::<drop_service::ArchiveFileDrag>(move |style, drag, _, _| {
+                let accepted = drop_enabled && browser_tab_drop_allowed(&drag.target.path);
+                style
+                    .bg(gpui::rgba(if accepted { (theme.accent << 8) | 0x2a } else { 0xef44441a }))
+                    .border_color(rgb(if accepted { theme.accent } else { 0xef4444 }))
+            })
+            .drag_over::<gpui::ExternalPaths>(move |style, paths, _, _| {
+                let accepted = drop_enabled && browser_tab_drop_accepts(paths.paths());
+                style
+                    .bg(gpui::rgba(if accepted { (theme.accent << 8) | 0x2a } else { 0xef44441a }))
+                    .border_color(rgb(if accepted { theme.accent } else { 0xef4444 }))
+            })
+            .on_drop(cx.listener(move |manager, drag: &drop_service::ArchiveFileDrag, _, cx| {
+                cx.stop_propagation();
+                open_browser_tab_drop(manager, pane_index, tab_index, drag.target.path.clone(), cx);
+            }))
+            .on_drop(cx.listener(move |manager, paths: &gpui::ExternalPaths, _, cx| {
+                cx.stop_propagation();
+                if let [path] = paths.paths() {
+                    open_browser_tab_drop(manager, pane_index, tab_index, path.clone(), cx);
+                }
+            }))
+            .when(!selected, |tab| {
+                tab.hover(|style| {
+                    style
+                        .bg(rgb(theme.hover))
+                        .border_color(rgb(theme.border))
+                        .text_color(rgb(theme.text))
+                })
+            })
+            .child(crate::app_icon(
+                icon,
+                13.0,
+                if selected { theme.accent } else { theme.icon },
+            ))
+            .child(div().flex_1().min_w(px(0.0)).truncate().child(label));
+        if tab_count > 1 {
+            let close_tab = cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.close_browser_tab(pane_index, tab_index, cx);
+            });
+            tab = tab.child(
+                Button::new(format!("close-browser-tab-{pane_index}-{tab_index}"))
+                    .ghost()
+                    .xsmall()
+                    .w(px(18.0))
+                    .h(px(18.0))
+                    .flex_shrink_0()
+                    .icon(gpui::assets::IconName::X)
+                    .tooltip(language.text("Close"))
+                    .on_click(close_tab),
+            );
+        }
+        if selected {
+            tab = tab.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(2.0))
+                    .bg(rgb(theme.accent)),
+            );
+        }
+        tab_items.push(tab.into_any_element());
+    }
+    let scroll_selector = format!("browser-tabs-scroll:{pane_index}");
+    let tab_scroll = div()
+        .id(format!("browser-tabs-scroll-{pane_index}"))
+        .debug_selector(move || scroll_selector.clone())
+        .flex()
+        .items_center()
+        .gap_0()
+        .flex_1()
+        .min_w(px(0.0))
+        .h(px(30.0))
+        .track_scroll(&pane.tab_scroll)
+        .overflow_x_scroll()
+        .children(tab_items);
+    let new_tab_drop_enabled = drop_enabled;
+    let mut tab_bar = div()
+        .id(format!("browser-tabs-{pane_index}"))
+        .debug_selector(move || format!("browser-tabs-drop:{pane_index}"))
+        .flex()
+        .items_center()
+        .gap_1()
+        .h(px(30.0))
+        .flex_shrink_0()
+        .border_b_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(theme.sidebar))
+        .drag_over::<drop_service::ArchiveFileDrag>(move |style, drag, _, _| {
+            let accepted = new_tab_drop_enabled && browser_tab_drop_allowed(&drag.target.path);
+            style
+                .bg(gpui::rgba(if accepted { (theme.accent << 8) | 0x2a } else { 0xef44441a }))
+                .border_color(rgb(if accepted { theme.accent } else { 0xef4444 }))
+        })
+        .drag_over::<gpui::ExternalPaths>(move |style, paths, _, _| {
+            let accepted = new_tab_drop_enabled && browser_tab_drop_accepts(paths.paths());
+            style
+                .bg(gpui::rgba(if accepted { (theme.accent << 8) | 0x2a } else { 0xef44441a }))
+                .border_color(rgb(if accepted { theme.accent } else { 0xef4444 }))
+        })
+        .on_drop(cx.listener(move |manager, drag: &drop_service::ArchiveFileDrag, _, cx| {
+            cx.stop_propagation();
+            open_browser_tab_drop_as_new(manager, pane_index, drag.target.path.clone(), cx);
+        }))
+        .on_drop(cx.listener(move |manager, paths: &gpui::ExternalPaths, _, cx| {
+            cx.stop_propagation();
+            if let [path] = paths.paths() {
+                open_browser_tab_drop_as_new(manager, pane_index, path.clone(), cx);
+            }
+        }))
+        .child(tab_scroll);
+    let add_tab = cx.listener(move |this, _, _, cx| this.add_browser_tab(pane_index, cx));
+    let new_tab = div()
+        .id(format!("new-browser-tab-drop-{pane_index}"))
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(30.0))
+        .flex_shrink_0()
+        .child(
+            Button::new(format!("new-browser-tab-{pane_index}"))
+                .ghost()
+                .xsmall()
+                .icon(gpui::assets::IconName::Plus)
+                .tooltip(language.text("New tab"))
+                .on_click(add_tab),
+        );
+    tab_bar = tab_bar.child(new_tab);
+
+    let archive_path = manager.archive_path.clone();
+    let drop_target = archive_path.clone().map(|path| file_actions::EntryTarget {
+        name: manager.archive_name.clone().unwrap_or_default(),
+        key: path.to_string_lossy().into_owned(),
+        path,
+        archive_entry: (!manager.selected_folder.is_empty()).then(|| manager.selected_folder.clone()),
+        password: manager.archive_password.clone(),
+        is_directory: true,
+    });
+    let folder_drop_target = manager.current_directory.clone();
+    let folder_drop_enabled = manager.archive_drop_enabled();
+    let table_id = if pane_index == 0 { "archive-table" } else { "archive-table-secondary" };
+    let table_selector = table_id;
+    let scroll_id = if pane_index == 0 { "file-scroll-viewport" } else { "file-scroll-viewport-secondary" };
+    let scrollbar_id = if pane_index == 0 { "file-list-scrollbar" } else { "file-list-scrollbar-secondary" };
+    let table = gpui::base::Table::new(table_id)
+        .debug_selector(move || table_selector.to_owned())
+        .flex()
+        .flex_col()
+        .flex_1()
+        .w_full()
+        .min_h(px(0.0))
+        .overflow_hidden()
+        .child(
+            gpui::base::TableRow::new(format!("archive-table-header-{pane_index}"), 0)
+                .flex()
+                .items_center()
+                .w_full()
+                .h(px(28.0))
+                .flex_shrink_0()
+                .pr_2()
+                .border_b_1()
+                .border_color(rgb(theme.border))
+                .bg(rgb(theme.sidebar))
+                .text_xs()
+                .text_color(rgb(theme.muted_text))
+                .child(sort_header(
+                    language.text("NAME"), None, SortColumn::Name,
+                    manager.sort_column, manager.sort_ascending, pane_index, theme, cx,
+                ))
+                .child(sort_header(
+                    language.text("TYPE"), Some(130.0), SortColumn::Type,
+                    manager.sort_column, manager.sort_ascending, pane_index, theme, cx,
+                ))
+                .child(sort_header(
+                    language.text("SIZE"), Some(90.0), SortColumn::Size,
+                    manager.sort_column, manager.sort_ascending, pane_index, theme, cx,
+                )),
+        )
+        .child(
+            div()
+                .id(scroll_id)
+                .w_full()
+                .relative()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h(px(0.0))
+                .overflow_hidden()
+                .debug_selector(move || scroll_id.to_owned())
+                .when_some(drop_target, |area, target| {
+                    drop_service::archive_drop_area(
+                        area,
+                        target,
+                        theme,
+                        manager.archive_drop_enabled(),
+                        cx,
+                    )
+                })
+                .when_some(folder_drop_target, |area, directory| {
+                    let internal_hover = directory.clone();
+                    let external_hover = directory.clone();
+                    let internal_target = directory.clone();
+                    let external_target = directory;
+                    let internal_feedback_view = folder_drop_view.clone();
+                    let external_feedback_view = folder_drop_view.clone();
+                    let internal_feedback_scroll = folder_drop_scroll.clone();
+                    let external_feedback_scroll = folder_drop_scroll.clone();
+                    area.drag_over::<drop_service::ArchiveFileDrag>(move |style, drag, window, cx| {
+                        let accepted = folder_drop_enabled
+                            && crate::transfer::can_move_to_directory(
+                                &drag.target.path,
+                                &internal_hover,
+                            );
+                        let show_last_marker = accepted
+                            .then(|| last_visible_drop_row(
+                                &internal_feedback_scroll,
+                                folder_drop_row_count,
+                                window.mouse_position().y,
+                            ))
+                            .flatten();
+                        let _ = internal_feedback_view.update(cx, |manager, cx| {
+                            let _ = manager.with_browser_tab(folder_drop_tab_id, |manager| {
+                                if manager.drop_marker_row != show_last_marker {
+                                    manager.drop_marker_row = show_last_marker;
+                                    cx.notify();
+                                }
+                            });
+                        });
+                        style
+                            .bg(gpui::rgba(if accepted {
+                                (theme.accent << 8) | 0x42
+                            } else {
+                                0xef44442a
+                            }))
+                    })
+                    .drag_over::<gpui::ExternalPaths>(move |style, paths, window, cx| {
+                        let accepted = folder_drop_enabled
+                            && paths.paths().len() == 1
+                            && crate::transfer::can_move_to_directory(
+                                &paths.paths()[0],
+                                &external_hover,
+                            );
+                        let show_last_marker = accepted
+                            .then(|| last_visible_drop_row(
+                                &external_feedback_scroll,
+                                folder_drop_row_count,
+                                window.mouse_position().y,
+                            ))
+                            .flatten();
+                        let _ = external_feedback_view.update(cx, |manager, cx| {
+                            let _ = manager.with_browser_tab(folder_drop_tab_id, |manager| {
+                                if manager.drop_marker_row != show_last_marker {
+                                    manager.drop_marker_row = show_last_marker;
+                                    cx.notify();
+                                }
+                            });
+                        });
+                        style
+                            .bg(gpui::rgba(if accepted {
+                                (theme.accent << 8) | 0x42
+                            } else {
+                                0xef44442a
+                            }))
+                    })
+                    .on_drop(cx.listener(
+                        move |manager, drag: &drop_service::ArchiveFileDrag, window, cx| {
+                            cx.stop_propagation();
+                            manager.active_browser = pane_index;
+                            manager.inspector_focus = false;
+                            manager.drop_marker_row = None;
+                            manager.receive_folder_drop(
+                                &internal_target,
+                                std::slice::from_ref(&drag.target.path),
+                                window,
+                                cx,
+                            );
+                        },
+                    ))
+                    .on_drop(cx.listener(
+                        move |manager, paths: &gpui::ExternalPaths, window, cx| {
+                            cx.stop_propagation();
+                            manager.active_browser = pane_index;
+                            manager.inspector_focus = false;
+                            manager.drop_marker_row = None;
+                            manager.receive_folder_drop(&external_target, paths.paths(), window, cx);
+                        },
+                    ))
+                })
+                .child(file_list)
+                .child(
+                    gpui::component::scroll::Scrollbar::vertical(&manager.file_scroll)
+                        .id(scrollbar_id)
+                        .mode(gpui::component::scroll::ScrollbarMode::Always),
+                ),
+        );
+    let activate_left = cx.listener(move |this, _, _, cx| {
+        if this.active_browser != pane_index || this.inspector_focus {
+            this.active_browser = pane_index;
+            this.inspector_focus = false;
+            cx.notify();
+        }
+    });
+    let activate_right = cx.listener(move |this, _, _, cx| {
+        if this.active_browser != pane_index || this.inspector_focus {
+            this.active_browser = pane_index;
+            this.inspector_focus = false;
+            cx.notify();
+        }
+    });
+    let panel_id = if pane_index == 0 { "browser-pane" } else { "browser-pane-secondary" };
+    let panel_selector = panel_id;
+    let panel = div()
+        .id(panel_id)
+        .debug_selector(move || panel_selector.to_owned())
+        .on_mouse_down(gpui::MouseButton::Left, activate_left)
+        .on_mouse_down(gpui::MouseButton::Right, activate_right)
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w(px(0.0))
+        .min_h(px(0.0))
+        .bg(rgb(theme.surface))
+        .border_1()
+        .border_color(rgb(theme.border))
+        .when(focused, |this| {
+            this.border_color(gpui::rgba((theme.accent << 8) | 0x60))
+        })
+        .child(tab_bar)
+        .child(table);
+    manager.active_browser = previous_browser;
+    panel
+}
+
 /// Renders a sidebar section title and an optional item count.
 fn sidebar_heading(label: &'static str, count: Option<usize>, theme: Theme) -> impl IntoElement {
     div()
@@ -1020,14 +1434,24 @@ fn sort_header(
     column: SortColumn,
     active_column: SortColumn,
     ascending: bool,
+    pane_index: usize,
     theme: Theme,
     cx: &mut Context<ArchiveManager>,
 ) -> impl IntoElement {
     let active = column == active_column;
-    let id = match column {
+    let base_id = match column {
         SortColumn::Name => "sort-name",
         SortColumn::Type => "sort-type",
         SortColumn::Size => "sort-size",
+    };
+    let id = if pane_index == 0 {
+        base_id
+    } else {
+        match column {
+            SortColumn::Name => "sort-name-secondary",
+            SortColumn::Type => "sort-type-secondary",
+            SortColumn::Size => "sort-size-secondary",
+        }
     };
     let column_index = match column {
         SortColumn::Name => 0,
@@ -1155,6 +1579,8 @@ fn file_row(
     language: Language,
     folder_size_known: bool,
     row_index: usize,
+    pane_index: usize,
+    show_bottom_drop_border: bool,
     theme: Theme,
     drop_enabled: bool,
     search_target: Option<file_actions::EntryTarget>,
@@ -1195,7 +1621,20 @@ fn file_row(
     let drop_target = target.clone();
     let drag_target = target.clone();
     let can_drag = target.archive_entry.is_none() && drop_enabled;
-    let drop_candidate = (target.is_directory && target.archive_entry.is_none())
+    let drop_to_directory = current_directory
+        .map(Path::to_path_buf)
+        .filter(|_| {
+            target.archive_entry.is_none()
+                && !target.is_directory
+                && !archive::is_supported_archive(&target.path)
+        });
+    let adds_to_archive = (!target.is_directory
+        && target.archive_entry.is_none()
+        && archive::is_supported_archive(&target.path))
+        || (target.is_directory && target.archive_entry.is_some());
+    let archive_feedback_color = drop_service::archive_drop_feedback_color(theme);
+    let drop_candidate = drop_to_directory.is_some()
+        || (target.is_directory && target.archive_entry.is_none())
         || (archive::is_supported_archive(&target.path)
             && (target.archive_entry.is_none() || target.is_directory));
     let menu_view = cx.entity().downgrade();
@@ -1203,7 +1642,8 @@ fn file_row(
     gpui::base::TableRow::new(gpui::SharedString::from(entry_name.clone()), row_index)
         .debug_selector({
             let name = entry_name.clone();
-            move || format!("file:{name}")
+            let prefix = if pane_index == 0 { "file" } else { "file-secondary" };
+            move || format!("{prefix}:{name}")
         })
         .flex()
         .items_center()
@@ -1211,8 +1651,9 @@ fn file_row(
         .h(px(28.0))
         .flex_shrink_0()
         .px_2()
+        .relative()
         .border_b_1()
-        .border_color(rgb(theme.subtle_border))
+        .border_color(rgb(if show_bottom_drop_border { theme.accent } else { theme.subtle_border }))
         .text_xs()
         .cursor_pointer()
         .bg(rgb(if striped {
@@ -1237,46 +1678,80 @@ fn file_row(
             let hover_target = drop_target.clone();
             let external_hover = drop_target.clone();
             let external_target = drop_target.clone();
+            let internal_directory = drop_to_directory.clone();
+            let external_directory = drop_to_directory.clone();
+            let internal_destination = drop_to_directory.clone();
+            let external_destination = drop_to_directory.clone();
             row.drag_over::<drop_service::ArchiveFileDrag>(move |style, drag, _, _| {
+                let sources = std::slice::from_ref(&drag.target.path);
                 let accepted = drop_enabled
-                    && drop_service::accepts_entry_drop(
-                        &hover_target,
-                        std::slice::from_ref(&drag.target.path),
-                    );
+                    && if let Some(directory) = &internal_directory {
+                        sources.len() == 1
+                            && crate::transfer::can_move_to_directory(&sources[0], directory)
+                    } else {
+                        drop_service::accepts_entry_drop(&hover_target, sources)
+                    };
+                let feedback_color = if adds_to_archive { archive_feedback_color } else { theme.accent };
                 style
                     .bg(gpui::rgba(if accepted {
-                        (theme.accent << 8) | 0x2a
+                        (feedback_color << 8) | 0x2a
                     } else {
                         0xef44441a
                     }))
-                    .border_color(rgb(if accepted { theme.accent } else { 0xef4444 }))
+                    .border_color(rgb(if accepted { feedback_color } else { 0xef4444 }))
             })
             .drag_over::<gpui::ExternalPaths>(move |style, paths, _, _| {
                 let accepted = drop_enabled
-                    && drop_service::accepts_entry_drop(&external_hover, paths.paths());
+                    && if let Some(directory) = &external_directory {
+                        paths.paths().len() == 1
+                            && crate::transfer::can_move_to_directory(
+                                &paths.paths()[0],
+                                directory,
+                            )
+                    } else {
+                        drop_service::accepts_entry_drop(&external_hover, paths.paths())
+                    };
+                let feedback_color = if adds_to_archive { archive_feedback_color } else { theme.accent };
                 style
                     .bg(gpui::rgba(if accepted {
-                        (theme.accent << 8) | 0x2a
+                        (feedback_color << 8) | 0x2a
                     } else {
                         0xef44441a
                     }))
-                    .border_color(rgb(if accepted { theme.accent } else { 0xef4444 }))
+                    .border_color(rgb(if accepted { feedback_color } else { 0xef4444 }))
             })
             .on_drop(cx.listener(
                 move |manager, drag: &drop_service::ArchiveFileDrag, window, cx| {
                     cx.stop_propagation();
-                    manager.receive_entry_drop(
-                        &drop_target,
-                        std::slice::from_ref(&drag.target.path),
-                        window,
-                        cx,
-                    );
+                    manager.active_browser = pane_index;
+                    manager.inspector_focus = false;
+                    if let Some(directory) = &internal_destination {
+                        manager.receive_folder_drop(
+                            directory,
+                            std::slice::from_ref(&drag.target.path),
+                            window,
+                            cx,
+                        );
+                    } else {
+                        manager.receive_entry_drop(
+                            &drop_target,
+                            std::slice::from_ref(&drag.target.path),
+                            window,
+                            cx,
+                        );
+                    }
                 },
             ))
             .on_drop(cx.listener(
                 move |manager, paths: &gpui::ExternalPaths, window, cx| {
                     cx.stop_propagation();
-                    manager.receive_entry_drop(&external_target, paths.paths(), window, cx);
+                    manager.active_browser = pane_index;
+                    manager.inspector_focus = false;
+                    if let Some(directory) = &external_destination {
+                        manager.receive_folder_drop(directory, paths.paths(), window, cx);
+                    } else {
+                        manager.receive_entry_drop(&external_target, paths.paths(), window, cx);
+                    }
                 },
             ))
         })

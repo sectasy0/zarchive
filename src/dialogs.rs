@@ -636,6 +636,7 @@ pub(crate) fn modal_view(
         Modal::CompareArchives => "Compare archives",
         Modal::Recovery => "Archive Repair & Recovery",
         Modal::Conversion => "Convert archive",
+        Modal::Info => "Info",
         Modal::Password => "Archive password",
         Modal::Delete => if manager.file_actions.pending_delete.as_ref().is_some_and(|target| target.archive_entry.is_some()) {
             "Remove from archive"
@@ -663,6 +664,9 @@ pub(crate) fn modal_view(
         }
         Modal::Conversion => {
             content = content.child(crate::conversion::view(manager, theme, cx));
+        }
+        Modal::Info => {
+            content = content.child(file_actions::info_view(manager, theme, language));
         }
         Modal::CompareArchives => {
             content = content

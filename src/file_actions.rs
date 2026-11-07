@@ -22,6 +22,8 @@ pub struct FileActions {
     pub pending_delete: Option<EntryTarget>,
     /// Background Trash request, when one is active.
     pub delete_task: Option<u64>,
+    /// Filesystem item or archive entry shown in the Info dialog.
+    pub info_target: Option<EntryTarget>,
 }
 
 #[derive(Clone)]
@@ -55,6 +57,7 @@ pub enum EntryAction {
     TestIntegrity,
     Audit,
     CopyPath,
+    Info,
     Trash,
 }
 
@@ -73,6 +76,7 @@ impl EntryAction {
             Self::TestIntegrity => "Test integrity",
             Self::Audit => "Audit archive",
             Self::CopyPath => "Copy path",
+            Self::Info => "Info",
             Self::Trash => "Move to Trash",
         }
     }
@@ -91,6 +95,7 @@ impl EntryAction {
             Self::TestIntegrity => IconName::ShieldCheck.into(),
             Self::Audit => IconName::ScanSearch.into(),
             Self::CopyPath => IconName::Copy.into(),
+            Self::Info => IconName::Info.into(),
             Self::Trash => IconName::Trash.into(),
         }.mr(px(4.0))
     }
@@ -99,7 +104,7 @@ impl EntryAction {
 impl EntryTarget {
     /// Lists only the actions valid for this filesystem or archive target.
     pub fn actions(&self) -> Vec<EntryAction> {
-        let mut actions = vec![EntryAction::Open, EntryAction::CopyPath];
+        let mut actions = vec![EntryAction::Open, EntryAction::CopyPath, EntryAction::Info];
         if !self.is_directory {
             actions.push(EntryAction::Inspect);
         }
@@ -201,6 +206,7 @@ impl ArchiveManager {
         }
         self.close_modal(window, cx);
         let path = target.path.clone();
+        let browser_tab_id = self.active_browser_tab().id;
         self.file_actions.delete_task = Some(self.background_queue.enqueue(
             "Moving to Trash...",
             crate::task_queue::TaskControl::default().for_paths([target.path.clone()]),
@@ -211,7 +217,11 @@ impl ArchiveManager {
                 reporter.set(1, 1);
                 Ok(())
             },
-            move |this, result, _, cx| this.complete_delete(target, result, cx),
+            move |this, result, _, cx| {
+                let _ = this.with_browser_tab(browser_tab_id, |this| {
+                    this.complete_delete(target, result, cx);
+                });
+            },
             cx,
         ));
         cx.notify();
@@ -363,6 +373,195 @@ impl ArchiveManager {
     }
 }
 
+fn info_time(language: Language, value: Option<std::time::SystemTime>) -> String {
+    value.map_or_else(
+        || language.text("Unavailable").to_owned(),
+        |time| {
+            chrono::DateTime::<chrono::Local>::from(time)
+                .format("%Y-%m-%d %H:%M:%S %:z")
+                .to_string()
+        },
+    )
+}
+
+fn info_row(label: String, value: String, theme: Theme) -> impl IntoElement {
+    let selector = format!("file-info-row:{label}");
+    div()
+        .id(gpui::SharedString::from(selector.clone()))
+        .debug_selector(move || selector.clone())
+        .flex()
+        .items_start()
+        .gap_4()
+        .w_full()
+        .min_h(px(28.0))
+        .py_1()
+        .border_b_1()
+        .border_color(rgb(theme.subtle_border))
+        .child(
+            div()
+                .w(px(150.0))
+                .flex_shrink_0()
+                .text_color(rgb(theme.muted_text))
+                .child(label),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .text_color(rgb(theme.text))
+                .child(value),
+        )
+}
+
+pub(crate) fn info_view(
+    manager: &ArchiveManager,
+    theme: Theme,
+    language: Language,
+) -> impl IntoElement {
+    let mut rows = Vec::new();
+    if let Some(target) = &manager.file_actions.info_target {
+        rows.push((language.text("Name").to_owned(), target.name.clone()));
+        if let Some(entry_path) = target.archive_entry.as_deref() {
+            rows.push((
+                language.text("Archive file").to_owned(),
+                target.path.display().to_string(),
+            ));
+            rows.push((
+                language.text("Path").to_owned(),
+                format!("{}!/{entry_path}", target.path.display()),
+            ));
+            if let Some(entry) = manager.entries.iter().find(|entry| {
+                entry.source_path.as_deref() == Some(entry_path)
+                    || entry.name == target.name
+            }) {
+                rows.push((
+                    language.text("File type").to_owned(),
+                    language
+                        .text(if entry.is_directory { "Folder" } else { "File" })
+                        .to_owned(),
+                ));
+                rows.push((
+                    language.text("Size").to_owned(),
+                    crate::format_size(entry.size),
+                ));
+                rows.push((
+                    language.text("Modified").to_owned(),
+                    entry
+                        .modified
+                        .map_or_else(|| language.text("Unavailable").to_owned(), |date| date.to_string()),
+                ));
+                rows.push((
+                    language.text("Encrypted").to_owned(),
+                    language
+                        .text(if entry.is_encrypted { "Yes" } else { "No" })
+                        .to_owned(),
+                ));
+            }
+        } else {
+            rows.push((
+                language.text("Path").to_owned(),
+                target.path.display().to_string(),
+            ));
+            match std::fs::symlink_metadata(&target.path) {
+                Ok(metadata) => {
+                    let file_type = metadata.file_type();
+                    let type_label = if file_type.is_symlink() {
+                        "Symbolic link"
+                    } else if metadata.is_dir() {
+                        "Folder"
+                    } else if metadata.is_file() {
+                        "File"
+                    } else {
+                        "Unknown"
+                    };
+                    rows.push((
+                        language.text("File type").to_owned(),
+                        language.text(type_label).to_owned(),
+                    ));
+                    if !metadata.is_dir() {
+                        rows.push((
+                            language.text("Size").to_owned(),
+                            crate::format_size(metadata.len()),
+                        ));
+                    }
+                    rows.push((
+                        language.text("Created").to_owned(),
+                        info_time(language, metadata.created().ok()),
+                    ));
+                    rows.push((
+                        language.text("Modified").to_owned(),
+                        info_time(language, metadata.modified().ok()),
+                    ));
+                    rows.push((
+                        language.text("Accessed").to_owned(),
+                        info_time(language, metadata.accessed().ok()),
+                    ));
+                    rows.push((
+                        language.text("Read-only").to_owned(),
+                        language
+                            .text(if metadata.permissions().readonly() { "Yes" } else { "No" })
+                            .to_owned(),
+                    ));
+                    let hidden = target
+                        .path
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy().starts_with('.'));
+                    rows.push((
+                        language.text("Hidden").to_owned(),
+                        language.text(if hidden { "Yes" } else { "No" }).to_owned(),
+                    ));
+                    if file_type.is_symlink() {
+                        rows.push((
+                            language.text("Link target").to_owned(),
+                            std::fs::read_link(&target.path)
+                                .map(|path| path.display().to_string())
+                                .unwrap_or_else(|_| language.text("Unavailable").to_owned()),
+                        ));
+                    }
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        rows.push((
+                            language.text("Filesystem permissions").to_owned(),
+                            format!("{:04o}", metadata.mode() & 0o7777),
+                        ));
+                        rows.push((
+                            language.text("Owner/group").to_owned(),
+                            format!("{} / {}", metadata.uid(), metadata.gid()),
+                        ));
+                        rows.push((language.text("Inode").to_owned(), metadata.ino().to_string()));
+                        rows.push((
+                            language.text("Hard links").to_owned(),
+                            metadata.nlink().to_string(),
+                        ));
+                    }
+                    #[cfg(windows)]
+                    {
+                        use std::os::windows::fs::MetadataExt;
+                        rows.push((
+                            language.text("Attributes").to_owned(),
+                            format!("0x{:08x}", metadata.file_attributes()),
+                        ));
+                    }
+                }
+                Err(error) => rows.push((
+                    language.text("Metadata unavailable").to_owned(),
+                    error.to_string(),
+                )),
+            }
+        }
+    }
+    div()
+        .id("file-info-metadata")
+        .debug_selector(|| "file-info-metadata".to_owned())
+        .flex()
+        .flex_col()
+        .w_full()
+        .max_h(px(480.0))
+        .overflow_y_scroll()
+        .children(rows.into_iter().map(|(label, value)| info_row(label, value, theme)))
+}
+
 fn context_menu_groups(target: &EntryTarget) -> Vec<Vec<EntryAction>> {
     use EntryAction::*;
     let available = target.actions();
@@ -371,7 +570,7 @@ fn context_menu_groups(target: &EntryTarget) -> Vec<Vec<EntryAction>> {
         &[CreateArchive, ExtractHere, ExtractArchive, ConvertArchive, Extract],
         &[Inspect, TestIntegrity, Audit],
         &[CopyPath, MoveTo],
-        &[Trash],
+        &[Info, Trash],
     ];
     groups.iter()
         .map(|group| group.iter().copied().filter(|action| available.contains(action)).collect::<Vec<_>>())
@@ -432,6 +631,10 @@ pub fn menu(
                     let _ = view.update(cx, |this, cx| match action {
                         EntryAction::Open => this.open_entry(&target, cx),
                         EntryAction::CopyPath => this.copy_entry_path(&target, cx),
+                        EntryAction::Info => {
+                            this.file_actions.info_target = Some(target.clone());
+                            this.show_modal(Modal::Info, window, cx);
+                        }
                         EntryAction::Extract => this.save_archived_file(&target, cx),
                         EntryAction::ExtractArchive => {
                             this.request_extract_archive(&target, false, window, cx)
@@ -604,21 +807,21 @@ mod tests {
             vec![CreateArchive, ExtractHere, ExtractArchive, ConvertArchive],
             vec![Inspect, TestIntegrity, Audit],
             vec![CopyPath, MoveTo],
-            vec![Trash],
+            vec![Info, Trash],
         ]);
         target.path = "notes.txt".into();
         assert_eq!(context_menu_groups(&target), vec![
-            vec![Open], vec![CreateArchive], vec![Inspect], vec![CopyPath, MoveTo], vec![Trash],
+            vec![Open], vec![CreateArchive], vec![Inspect], vec![CopyPath, MoveTo], vec![Info, Trash],
         ]);
         target.is_directory = true;
         assert_eq!(context_menu_groups(&target), vec![
-            vec![Open], vec![CreateArchive], vec![CopyPath, MoveTo], vec![Trash],
+            vec![Open], vec![CreateArchive], vec![CopyPath, MoveTo], vec![Info, Trash],
         ]);
         target.archive_entry = Some("folder".into());
-        assert_eq!(context_menu_groups(&target), vec![vec![Open], vec![CopyPath]]);
+        assert_eq!(context_menu_groups(&target), vec![vec![Open], vec![CopyPath], vec![Info]]);
         target.is_directory = false;
         target.archive_entry = Some("notes.txt".into());
-        assert_eq!(context_menu_groups(&target), vec![vec![Open], vec![Extract], vec![Inspect], vec![CopyPath]]);
+        assert_eq!(context_menu_groups(&target), vec![vec![Open], vec![Extract], vec![Inspect], vec![CopyPath], vec![Info]]);
         let grouped: Vec<_> = context_menu_groups(&target).into_iter().flatten().collect();
         assert_eq!(grouped.len(), target.actions().len());
         assert!(target.actions().iter().all(|action| grouped.contains(action)));
@@ -667,6 +870,23 @@ mod tests {
             cx.read_from_clipboard().unwrap().text().unwrap(),
             path.display().to_string()
         );
+
+        cx.update(|window, cx| window.right_click("notes.txt", cx));
+        choose_menu_item(cx, "Info");
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert!(matches!(manager.modal, Some(Modal::Info)));
+            assert_eq!(manager.file_actions.info_target.as_ref().unwrap().path, path);
+        });
+        assert!(cx.debug_bounds("file-info-row:Name").is_some());
+        assert!(cx.debug_bounds("file-info-row:Path").is_some());
+        #[cfg(unix)]
+        assert!(cx.debug_bounds("file-info-row:Filesystem permissions").is_some());
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
 
         cx.update(|window, cx| window.right_click("notes.txt", cx));
         choose_menu_item(cx, "Create archive");
@@ -800,18 +1020,23 @@ mod tests {
             [
                 EntryAction::Open,
                 EntryAction::CopyPath,
+                EntryAction::Info,
                 EntryAction::Inspect,
                 EntryAction::Extract
             ]
         );
         target.is_directory = true;
-        assert_eq!(target.actions(), [EntryAction::Open, EntryAction::CopyPath]);
+        assert_eq!(
+            target.actions(),
+            [EntryAction::Open, EntryAction::CopyPath, EntryAction::Info]
+        );
         target.archive_entry = None;
         assert_eq!(
             target.actions(),
             [
                 EntryAction::Open,
                 EntryAction::CopyPath,
+                EntryAction::Info,
                 EntryAction::CreateArchive,
                 EntryAction::MoveTo,
                 EntryAction::Trash

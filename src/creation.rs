@@ -363,6 +363,7 @@ impl ArchiveManager {
         let total_sources = sources.len() as u64;
         let create_parity = self.creation.create_parity;
         let parity_percent = self.creation.recovery_percent();
+        let browser_tab_id = self.active_browser_tab().id;
         self.creation.error = None;
         self.status_message = None;
         let task_id = self.background_queue.enqueue(
@@ -387,6 +388,7 @@ impl ArchiveManager {
                 )
             },
             move |this, result, _, cx| {
+                let _ = this.with_browser_tab(browser_tab_id, |this| {
                 this.creation_task = None;
                 match result {
                     Ok(entries) => {
@@ -420,6 +422,7 @@ impl ArchiveManager {
                     }
                 }
                 cx.notify();
+                });
             },
             cx,
         );

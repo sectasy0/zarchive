@@ -367,6 +367,7 @@ impl ArchiveManager {
     fn start_operation(&mut self, operation: Operation, _window: &Window, cx: &mut Context<Self>) {
         let work = operation.clone();
         let label = operation.progress();
+        let browser_tab_id = self.active_browser_tab().id;
         self.file_actions.operations.active += 1;
         self.status_message = None;
         self.background_queue.enqueue(
@@ -378,6 +379,7 @@ impl ArchiveManager {
                 work.run()
             },
             move |this, result, window, cx| {
+                let _ = this.with_browser_tab(browser_tab_id, |this| {
                 this.file_actions.operations.active = this.file_actions.operations.active.saturating_sub(1);
                 let completed = match result {
                     Ok(destination) => Some(Ok(destination)),
@@ -410,6 +412,11 @@ impl ArchiveManager {
                         }
                         if this.current_directory.as_deref() == operation.target().path.parent()
                             || this.current_directory.as_deref() == destination.parent()
+                            || matches!(
+                                &operation,
+                                Operation::Move { directory, .. }
+                                    if this.current_directory.as_ref() == Some(directory)
+                            )
                         { this.refresh_location(cx); }
                         if refresh_inspector {
                             this.inspect_sources(vec![(destination.clone(), operation.target().password.clone())],
@@ -440,6 +447,7 @@ impl ArchiveManager {
                     }
                 }
                 cx.notify();
+                });
             },
             cx,
         );

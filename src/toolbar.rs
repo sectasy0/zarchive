@@ -434,6 +434,7 @@ fn refresh_archive_search(manager: &mut ArchiveManager, _window: &Window, cx: &m
     let entries = manager.entries.clone();
     let cancel = manager.toolbar_search.cancel.clone();
     let revision = manager.toolbar_search.revision;
+    let browser_tab_id = manager.active_browser_tab().id;
     let executor = cx.background_executor().clone();
     let scan_directory = directory.clone();
     let scan_query = query.clone();
@@ -459,6 +460,7 @@ fn refresh_archive_search(manager: &mut ArchiveManager, _window: &Window, cx: &m
             Ok(results)
         },
         move |manager, result, _, cx| {
+            let _ = manager.with_browser_tab(browser_tab_id, |manager| {
                     if manager.toolbar_search.revision != revision
                         || manager.current_directory.as_ref() != Some(&directory)
                         || manager.toolbar_search.query != query { return; }
@@ -469,6 +471,7 @@ fn refresh_archive_search(manager: &mut ArchiveManager, _window: &Window, cx: &m
                     }
                     manager.toolbar_search.matches = results.into_iter().map(|result| (result.target.key.clone(), result)).collect();
                     cx.notify();
+                    });
         },
         cx,
     ));
@@ -551,6 +554,7 @@ pub(crate) mod key_actions {
             EnterFolder,
             LeaveFolder,
             PreviewSelection,
+            CloseBrowserTab,
         ]
     );
 }

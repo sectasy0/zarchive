@@ -45,7 +45,9 @@ use icons::IconAssets;
 pub(crate) use preferences::{AccentColor, AdvancedSettings, ThemeMode, UserPreferences};
 use preferences::{load_user_preferences, user_preferences_path};
 use std::collections::BTreeMap;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::NamedTempFile;
 pub(crate) use toolbar::toolbar_button;
 pub(crate) use app::{app_icon, format_size};
@@ -75,6 +77,7 @@ enum Modal {
     CompareArchives,
     Recovery,
     Conversion,
+    Info,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -175,24 +178,10 @@ fn directory_history(path: Option<&Path>) -> Vec<PathBuf> {
 
 /// Owns application state and coordinates navigation, dialogs, and archive actions.
 struct ArchiveManager {
-    current_directory: Option<PathBuf>,
-    directory_history: Vec<PathBuf>,
-    navigation_history_index: usize,
-    navigation_revision: u64,
-    navigation_control: task_queue::TaskControl,
-    archive_path: Option<PathBuf>,
-    archive_name: Option<String>,
-    archive_password: Option<password::ArchivePassword>,
-    entries: Vec<ArchiveEntry>,
-    error: Option<String>,
-    selected_folder: String,
-    selected_entry: Option<String>,
+    browsers: Vec<BrowserPane>,
+    active_browser: usize,
+    inspector_focus: bool,
     content_focus: FocusHandle,
-    sort_column: SortColumn,
-    sort_ascending: bool,
-    directory_sizes: Option<BTreeMap<String, u64>>,
-    directory_size_task: Option<u64>,
-    directory_size_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     opened_files: Vec<NamedTempFile>,
     status_message: Option<String>,
     notifications: Vec<(bool, String)>,
@@ -214,16 +203,211 @@ struct ArchiveManager {
     password_prompt: password::PasswordPrompt,
     password_blur: blur::PasswordBlur,
     controls: ui::Controls,
-    file_scroll: gpui::UniformListScrollHandle,
-    folder_scroll: gpui::ScrollHandle,
-    toolbar_search: toolbar::SearchField,
-    filters: filters::FilterBar,
     file_actions: file_actions::FileActions,
     inspector: inspector::Inspector,
     comparison_dialog: inspector::ComparisonDialog,
     recovery: recovery::State,
     conversion: conversion::State,
     background_queue: task_queue::BackgroundQueue,
+}
+
+/// Owns the navigation and view state for one browser tab.
+struct BrowserTab {
+    id: u64,
+    current_directory: Option<PathBuf>,
+    directory_history: Vec<PathBuf>,
+    navigation_history_index: usize,
+    navigation_revision: u64,
+    navigation_control: task_queue::TaskControl,
+    archive_path: Option<PathBuf>,
+    archive_name: Option<String>,
+    archive_password: Option<password::ArchivePassword>,
+    entries: Vec<ArchiveEntry>,
+    error: Option<String>,
+    selected_folder: String,
+    selected_entry: Option<String>,
+    sort_column: SortColumn,
+    sort_ascending: bool,
+    directory_sizes: Option<BTreeMap<String, u64>>,
+    directory_size_task: Option<u64>,
+    directory_size_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    file_scroll: gpui::UniformListScrollHandle,
+    folder_scroll: gpui::ScrollHandle,
+    toolbar_search: toolbar::SearchField,
+    filters: filters::FilterBar,
+    drop_marker_row: Option<usize>,
+}
+
+static NEXT_BROWSER_TAB_ID: AtomicU64 = AtomicU64::new(1);
+
+impl BrowserTab {
+    fn new(
+        current_directory: Option<PathBuf>,
+        archive_path: Option<PathBuf>,
+        archive_name: Option<String>,
+        entries: Vec<ArchiveEntry>,
+        error: Option<String>,
+    ) -> Self {
+        let directory_history = directory_history(current_directory.as_deref());
+        let navigation_history_index = directory_history.len().saturating_sub(1);
+        Self {
+            id: NEXT_BROWSER_TAB_ID.fetch_add(1, Ordering::Relaxed),
+            current_directory,
+            directory_history,
+            navigation_history_index,
+            navigation_revision: 0,
+            navigation_control: task_queue::TaskControl::default(),
+            archive_path,
+            archive_name,
+            archive_password: None,
+            entries,
+            error,
+            selected_folder: String::new(),
+            selected_entry: None,
+            sort_column: SortColumn::Name,
+            sort_ascending: true,
+            directory_sizes: None,
+            directory_size_task: None,
+            directory_size_cancel: None,
+            file_scroll: gpui::UniformListScrollHandle::new(),
+            folder_scroll: gpui::ScrollHandle::new(),
+            toolbar_search: toolbar::SearchField::default(),
+            filters: filters::FilterBar::default(),
+            drop_marker_row: None,
+        }
+    }
+}
+
+struct BrowserPane {
+    tabs: Vec<BrowserTab>,
+    active_tab: usize,
+    tab_scroll: gpui::ScrollHandle,
+}
+
+impl BrowserPane {
+    fn new(tab: BrowserTab) -> Self {
+        Self {
+            tabs: vec![tab],
+            active_tab: 0,
+            tab_scroll: gpui::ScrollHandle::new(),
+        }
+    }
+}
+
+impl Drop for BrowserTab {
+    fn drop(&mut self) {
+        self.navigation_control.cancel();
+        if let Some(cancel) = &self.directory_size_cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+fn two_browser_panes(
+    current_directory: Option<PathBuf>,
+    archive_path: Option<PathBuf>,
+    archive_name: Option<String>,
+    entries: Vec<ArchiveEntry>,
+    error: Option<String>,
+) -> Vec<BrowserPane> {
+    (0..2)
+        .map(|_| {
+            BrowserPane::new(BrowserTab::new(
+                current_directory.clone(),
+                archive_path.clone(),
+                archive_name.clone(),
+                entries.clone(),
+                error.clone(),
+            ))
+        })
+        .collect()
+}
+
+impl ArchiveManager {
+    fn active_browser_tab(&self) -> &BrowserTab {
+        &self.browsers[self.active_browser].tabs[self.browsers[self.active_browser].active_tab]
+    }
+
+    fn active_browser_tab_mut(&mut self) -> &mut BrowserTab {
+        let pane = &mut self.browsers[self.active_browser];
+        &mut pane.tabs[pane.active_tab]
+    }
+
+    fn with_browser_tab<R>(
+        &mut self,
+        id: u64,
+        action: impl FnOnce(&mut Self) -> R,
+    ) -> Option<R> {
+        let (pane_index, tab_index) = self.browsers.iter().enumerate().find_map(|(pane_index, pane)| {
+            pane.tabs.iter().position(|tab| tab.id == id).map(|tab_index| (pane_index, tab_index))
+        })?;
+        let previous_pane = self.active_browser;
+        let previous_tab = self.browsers[previous_pane].active_tab;
+        self.active_browser = pane_index;
+        self.browsers[pane_index].active_tab = tab_index;
+        let result = action(self);
+        self.active_browser = previous_pane;
+        self.browsers[previous_pane].active_tab = previous_tab.min(self.browsers[previous_pane].tabs.len() - 1);
+        Some(result)
+    }
+
+    fn add_browser_tab(&mut self, pane_index: usize, cx: &mut Context<Self>) {
+        let source = &self.browsers[pane_index].tabs[self.browsers[pane_index].active_tab];
+        let mut tab = BrowserTab::new(
+            source.current_directory.clone(),
+            source.archive_path.clone(),
+            source.archive_name.clone(),
+            source.entries.clone(),
+            source.error.clone(),
+        );
+        tab.archive_password = source.archive_password.clone();
+        let pane = &mut self.browsers[pane_index];
+        pane.tabs.push(tab);
+        pane.active_tab = pane.tabs.len() - 1;
+        pane.tab_scroll.scroll_to_item(pane.active_tab);
+        self.active_browser = pane_index;
+        cx.notify();
+    }
+
+    fn close_browser_tab(
+        &mut self,
+        pane_index: usize,
+        tab_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let pane = &mut self.browsers[pane_index];
+        if pane.tabs.len() <= 1 || tab_index >= pane.tabs.len() {
+            return;
+        }
+        pane.tabs.remove(tab_index);
+        if pane.active_tab > tab_index {
+            pane.active_tab -= 1;
+        } else if pane.active_tab == tab_index {
+            pane.active_tab = tab_index.min(pane.tabs.len() - 1);
+        }
+        self.active_browser = pane_index;
+        cx.notify();
+    }
+
+    fn close_active_browser_tab(&mut self, cx: &mut Context<Self>) {
+        let pane_index = self.active_browser;
+        let tab_index = self.browsers[pane_index].active_tab;
+        self.close_browser_tab(pane_index, tab_index, cx);
+    }
+}
+
+impl Deref for ArchiveManager {
+    type Target = BrowserTab;
+
+    fn deref(&self) -> &Self::Target {
+        self.active_browser_tab()
+    }
+}
+
+impl DerefMut for ArchiveManager {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.active_browser_tab_mut()
+    }
 }
 
 impl ArchiveManager {
@@ -324,6 +508,7 @@ impl ArchiveManager {
             return;
         }
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let browser_tab_id = self.active_browser_tab().id;
         self.directory_size_cancel = Some(cancel.clone());
         let worker_cancel = cancel.clone();
         let total_folders = folders.len() as u64;
@@ -346,6 +531,7 @@ impl ArchiveManager {
                 Ok(results)
             },
             move |this, result, _, cx| {
+                let _ = this.with_browser_tab(browser_tab_id, |this| {
                 if completion_cancel.load(std::sync::atomic::Ordering::Relaxed)
                     || !this.auto_calculate_folder_sizes
                     || this.current_directory.as_ref() != Some(&directory)
@@ -381,6 +567,7 @@ impl ArchiveManager {
                     this.status_message = Some(format!("{}: {}", this.language.text("Could not calculate all folder sizes"), errors.join("; ")));
                 }
                 cx.notify();
+                });
             },
             cx,
         ));
@@ -500,6 +687,9 @@ impl ArchiveManager {
         if self.modal == Some(Modal::Conversion) {
             self.clear_conversion(window, cx);
         }
+        if self.modal == Some(Modal::Info) {
+            self.file_actions.info_target = None;
+        }
         self.modal = None;
         window.focus(&self.content_focus, cx);
         cx.notify();
@@ -531,8 +721,9 @@ impl ArchiveManager {
         match read_directory(&path) {
             Ok(entries) => {
                 if self.current_directory.as_ref() != Some(&path) {
+                    let history_index = self.navigation_history_index;
                     self.directory_history
-                        .truncate(self.navigation_history_index.saturating_add(1));
+                        .truncate(history_index.saturating_add(1));
                     if self.directory_history.last() != Some(&path) {
                         self.directory_history.push(path.clone());
                     }
@@ -558,6 +749,7 @@ impl ArchiveManager {
         self.navigation_revision = self.navigation_revision.wrapping_add(1);
         let revision = self.navigation_revision;
         self.navigation_control = task_queue::TaskControl::default().for_paths([path.clone()]);
+        let browser_tab_id = self.active_browser_tab().id;
         let source = path.clone();
         let key = password.clone();
         let folder = self.selected_folder.clone();
@@ -572,6 +764,7 @@ impl ArchiveManager {
                 Ok(entries)
             },
             move |manager, result, _, cx| {
+                let _ = manager.with_browser_tab(browser_tab_id, |manager| {
                 if manager.navigation_revision != revision { return; }
                 match result {
                     Ok(entries) => {
@@ -588,6 +781,7 @@ impl ArchiveManager {
                     }
                 }
                 cx.notify();
+                });
             },
             cx,
         );
@@ -706,35 +900,25 @@ fn main() {
                                 let _ = view.update(cx, |_, cx| cx.notify());
                             })
                             .detach();
-                        let directory_history = directory_history(current_directory.as_deref());
-                        let navigation_history_index = directory_history.len().saturating_sub(1);
-                        ArchiveManager {
+                        let initial_password_archive = startup_requires_password
+                            .then(|| archive_path.clone())
+                            .flatten();
+                        let browsers = two_browser_panes(
                             current_directory,
-                            directory_history,
-                            navigation_history_index,
-                            navigation_revision: 0,
-                            navigation_control: task_queue::TaskControl::default(),
-                            password_prompt: password::PasswordPrompt::new(
-                                cx,
-                                if startup_requires_password {
-                                    archive_path.clone()
-                                } else {
-                                    None
-                                },
-                            ),
                             archive_path,
                             archive_name,
-                            archive_password: None,
                             entries,
                             error,
-                            selected_folder: String::new(),
-                            selected_entry: None,
+                        );
+                        ArchiveManager {
+                            browsers,
+                            active_browser: 0,
+                            inspector_focus: false,
+                            password_prompt: password::PasswordPrompt::new(
+                                cx,
+                                initial_password_archive,
+                            ),
                             content_focus: cx.focus_handle(),
-                            sort_column: SortColumn::Name,
-                            sort_ascending: true,
-                            directory_sizes: None,
-                            directory_size_task: None,
-                            directory_size_cancel: None,
                             opened_files: Vec::new(),
                             status_message: None,
                             notifications: Vec::new(),
@@ -759,10 +943,6 @@ fn main() {
                             creation_task: None,
                             password_blur: blur::PasswordBlur::default(),
                             controls: ui::Controls::default(),
-                            file_scroll: gpui::UniformListScrollHandle::new(),
-                            folder_scroll: gpui::ScrollHandle::new(),
-                            toolbar_search: toolbar::SearchField::default(),
-                            filters: filters::FilterBar::default(),
                             file_actions: file_actions::FileActions::default(),
                             inspector: inspector::Inspector::default(),
                             comparison_dialog: inspector::ComparisonDialog::default(),
@@ -855,30 +1035,23 @@ mod tests {
         cx: &mut gpui::Context<super::ArchiveManager>,
     ) -> super::ArchiveManager {
         use super::{AccentColor, ArchiveManager, Language, ThemeMode};
-        ArchiveManager {
-            current_directory: Some(std::path::PathBuf::from("/test")),
-            directory_history: Vec::new(),
-            navigation_history_index: 0,
-            navigation_revision: 0,
-            navigation_control: crate::task_queue::TaskControl::default(),
-            archive_path: None,
-            archive_name: None,
-            archive_password: None,
-            entries: vec![
+        let browsers = super::two_browser_panes(
+            Some(std::path::PathBuf::from("/test")),
+            None,
+            None,
+            vec![
                 entry("Beta.txt", 300, false),
                 entry("alpha.zip", 20, false),
                 entry("Folder", 0, true),
                 entry("gamma.txt", 10, false),
             ],
-            error: None,
-            selected_folder: String::new(),
-            selected_entry: None,
+            None,
+        );
+        ArchiveManager {
+            browsers,
+            active_browser: 0,
+            inspector_focus: false,
             content_focus: cx.focus_handle(),
-            sort_column: SortColumn::Name,
-            sort_ascending: true,
-            directory_sizes: None,
-            directory_size_task: None,
-            directory_size_cancel: None,
             opened_files: Vec::new(),
             status_message: None,
             notifications: Vec::new(),
@@ -900,10 +1073,6 @@ mod tests {
             password_prompt: crate::password::PasswordPrompt::new(cx, None),
             password_blur: crate::blur::PasswordBlur::default(),
             controls: crate::ui::Controls::default(),
-            file_scroll: gpui::UniformListScrollHandle::new(),
-            folder_scroll: gpui::ScrollHandle::new(),
-            toolbar_search: crate::toolbar::SearchField::default(),
-            filters: crate::filters::FilterBar::default(),
             file_actions: crate::file_actions::FileActions::default(),
             inspector: crate::inspector::Inspector::default(),
             comparison_dialog: crate::inspector::ComparisonDialog::default(),
@@ -936,6 +1105,411 @@ mod tests {
         });
         window_cx.run_until_parked();
         (content.unwrap(), window_cx)
+    }
+
+    #[gpui::test]
+    fn browser_panes_and_tabs_keep_independent_locations(cx: &mut gpui::TestAppContext) {
+        let root = tempfile::tempdir().unwrap();
+        let left = root.path().join("left");
+        let right = root.path().join("right");
+        let second = right.join("second");
+        let third = right.join("third");
+        for directory in [&left, &right, &second, &third] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        std::fs::write(left.join("left.txt"), b"left").unwrap();
+        std::fs::write(right.join("right.txt"), b"right").unwrap();
+        let (view, cx) = component_window(cx, |_, cx| {
+            let mut manager = test_manager(cx);
+            manager.auto_calculate_folder_sizes = false;
+            manager.browsers[0].tabs[0] = super::BrowserTab::new(
+                Some(left.clone()), None, None, super::read_directory(&left).unwrap(), None,
+            );
+            manager.browsers[1].tabs[0] = super::BrowserTab::new(
+                Some(right.clone()), None, None, super::read_directory(&right).unwrap(), None,
+            );
+            manager
+        });
+
+        let left_panel = cx.debug_bounds("browser-pane").unwrap();
+        let right_panel = cx.debug_bounds("browser-pane-secondary").unwrap();
+        cx.simulate_click(right_panel.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(cx.debug_bounds("browser-pane").unwrap(), left_panel);
+        assert_eq!(cx.debug_bounds("browser-pane-secondary").unwrap(), right_panel);
+        cx.read(|cx| assert_eq!(view.read(cx).active_browser, 1));
+        view.update(cx, |manager, cx| {
+            manager.active_browser = 1;
+            manager.navigate_to(second.clone(), cx);
+            manager.add_browser_tab(1, cx);
+            manager.navigate_to(third.clone(), cx);
+            assert_eq!(manager.browsers[0].tabs[0].current_directory.as_ref(), Some(&left));
+            assert_eq!(manager.browsers[1].tabs[0].current_directory.as_ref(), Some(&second));
+            assert_eq!(manager.browsers[1].tabs[1].current_directory.as_ref(), Some(&third));
+        });
+    }
+
+    #[gpui::test]
+    fn browser_tab_strip_scrolls_and_keeps_new_tab_button_visible(cx: &mut gpui::TestAppContext) {
+        use gpui::test::TestWindowExt;
+        let (view, cx) = component_window(cx, |_, cx| test_manager(cx));
+        view.update(cx, |manager, cx| {
+            for _ in 0..11 {
+                manager.add_browser_tab(1, cx);
+            }
+        });
+        cx.run_until_parked();
+        let scroll = cx.debug_bounds("browser-tabs-scroll:1").unwrap();
+        let last_tab = cx.debug_bounds("browser-tab:1:11").unwrap();
+        let add_button = cx.update(|window, _| {
+            window
+                .within("browser-pane-secondary")
+                .find("new-browser-tab-1")
+                .bounds()
+        });
+        let panel = cx.debug_bounds("browser-pane-secondary").unwrap();
+        let offset = cx.read(|cx| view.read(cx).browsers[1].tab_scroll.offset().x);
+        assert!(offset < gpui::px(0.0));
+        assert!(last_tab.right() + offset <= scroll.right());
+        assert!(add_button.right() <= panel.right());
+        cx.read(|cx| assert_eq!(view.read(cx).browsers[1].tabs.len(), 12));
+    }
+
+    #[gpui::test]
+    fn ctrl_w_closes_only_the_active_browser_tab(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = component_window(cx, |_, cx| test_manager(cx));
+        view.update(cx, |manager, cx| {
+            manager.add_browser_tab(1, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            view.update(cx, |manager, cx| window.focus(&manager.content_focus, cx));
+        });
+        cx.simulate_keystrokes("ctrl-w");
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert_eq!(manager.browsers[1].tabs.len(), 1);
+            assert_eq!(manager.browsers[1].active_tab, 0);
+            assert_eq!(manager.browsers[0].tabs.len(), 1);
+            assert_eq!(manager.active_browser, 1);
+        });
+    }
+
+    #[gpui::test]
+    fn ctrl_w_closes_inspector_tab_when_inspector_has_focus(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = component_window(cx, |_, cx| {
+            let mut manager = test_manager(cx);
+            manager
+                .inspector
+                .select_or_create(Some(std::path::PathBuf::from("first.zip")));
+            manager
+                .inspector
+                .select_or_create(Some(std::path::PathBuf::from("second.zip")));
+            manager
+        });
+        let inspector_tab = cx.debug_bounds("inspector-target-tab:1").unwrap();
+        cx.simulate_click(inspector_tab.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            view.update(cx, |manager, cx| window.focus(&manager.content_focus, cx));
+        });
+        cx.simulate_keystrokes("ctrl-w");
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert_eq!(manager.inspector.test_session_count(), 1);
+            assert!(manager.inspector.visible);
+            assert_eq!(manager.browsers[0].tabs.len(), 1);
+            assert_eq!(manager.browsers[1].tabs.len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn dropping_folder_and_archive_onto_browser_tab_opens_them_there(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("Folder");
+        std::fs::create_dir(&folder).unwrap();
+        let source = root.path().join("inside.txt");
+        std::fs::write(&source, b"inside").unwrap();
+        let archive = root.path().join("bundle.zip");
+        crate::archive::create_zip(&archive, std::slice::from_ref(&source)).unwrap();
+        let root_path = root.path().to_path_buf();
+        let entries = super::read_directory(&root_path).unwrap();
+        let (view, cx) = component_window(cx, |_, cx| {
+            let mut manager = test_manager(cx);
+            manager.auto_calculate_folder_sizes = false;
+            manager.browsers[0].tabs[0] = super::BrowserTab::new(
+                Some(root_path.clone()), None, None, entries.clone(), None,
+            );
+            manager.browsers[1].tabs[0] = super::BrowserTab::new(
+                Some(root_path.clone()), None, None, entries.clone(), None,
+            );
+            manager
+        });
+
+        fn drag_to_target(
+            cx: &mut gpui::VisualTestContext,
+            source: gpui::SharedString,
+            destination: &'static str,
+        ) {
+            use gpui::test::TestWindowExt;
+            let start = cx.update(|window, _| {
+                window.within("browser-pane").find(source).bounds().center()
+            });
+            let end = cx.debug_bounds(destination).unwrap().center();
+            cx.simulate_mouse_move(start, None, gpui::Modifiers::default());
+            cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+            cx.simulate_mouse_move(
+                start + gpui::point(gpui::px(20.0), gpui::px(0.0)),
+                gpui::MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            cx.run_until_parked();
+            cx.simulate_mouse_move(end, gpui::MouseButton::Left, gpui::Modifiers::default());
+            cx.run_until_parked();
+            cx.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::default());
+            cx.run_until_parked();
+        }
+
+        drag_to_target(
+            cx,
+            gpui::SharedString::from(folder.to_string_lossy().into_owned()),
+            "browser-tab:1:0",
+        );
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert_eq!(manager.active_browser, 1);
+            assert_eq!(manager.browsers[1].tabs[0].current_directory.as_ref(), Some(&folder));
+            assert_eq!(manager.browsers[0].tabs[0].current_directory.as_ref(), Some(&root_path));
+        });
+
+        drag_to_target(
+            cx,
+            gpui::SharedString::from(archive.to_string_lossy().into_owned()),
+            "browser-tab:1:0",
+        );
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert_eq!(manager.active_browser, 1);
+            assert_eq!(manager.browsers[1].tabs[0].archive_path.as_ref(), Some(&archive));
+            assert!(manager.browsers[1].tabs[0].entries.iter().any(|entry| entry.name == "inside.txt"));
+            assert_eq!(manager.browsers[0].tabs[0].current_directory.as_ref(), Some(&root_path));
+        });
+
+        drag_to_target(
+            cx,
+            gpui::SharedString::from(folder.to_string_lossy().into_owned()),
+            "browser-tabs-scroll:1",
+        );
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert_eq!(manager.browsers[1].tabs.len(), 2);
+            assert_eq!(manager.browsers[1].active_tab, 1);
+            assert_eq!(manager.browsers[1].tabs[1].current_directory.as_ref(), Some(&folder));
+            assert_eq!(manager.browsers[1].tabs[0].archive_path.as_ref(), Some(&archive));
+        });
+
+        drag_to_target(
+            cx,
+            gpui::SharedString::from(archive.to_string_lossy().into_owned()),
+            "browser-tabs-scroll:1",
+        );
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert_eq!(manager.browsers[1].tabs.len(), 3);
+            assert_eq!(manager.browsers[1].active_tab, 2);
+            assert_eq!(manager.browsers[1].tabs[2].archive_path.as_ref(), Some(&archive));
+            assert_eq!(manager.browsers[1].tabs[1].current_directory.as_ref(), Some(&folder));
+            assert_eq!(manager.browsers[0].tabs[0].current_directory.as_ref(), Some(&root_path));
+        });
+    }
+
+    #[gpui::test]
+    fn dropping_file_on_other_browser_moves_it_to_that_location(cx: &mut gpui::TestAppContext) {
+        use gpui::test::TestWindowExt;
+        let root = tempfile::tempdir().unwrap();
+        let source_directory = root.path().join("source");
+        let destination_directory = root.path().join("destination");
+        let target_folder = destination_directory.join("target-folder");
+        let target_file = destination_directory.join("existing.txt");
+        std::fs::create_dir(&source_directory).unwrap();
+        std::fs::create_dir_all(&target_folder).unwrap();
+        std::fs::write(&target_file, b"existing target").unwrap();
+        let source = source_directory.join("move-me.txt");
+        let source_below = source_directory.join("move-below.txt");
+        let destination = destination_directory.join("move-me.txt");
+        let destination_below = destination_directory.join("move-below.txt");
+        std::fs::write(&source, b"move between browsers").unwrap();
+        std::fs::write(&source_below, b"drop below the list").unwrap();
+        let (view, cx) = component_window(cx, |_, cx| {
+            let mut manager = test_manager(cx);
+            manager.auto_calculate_folder_sizes = false;
+            manager.browsers[0].tabs[0] = super::BrowserTab::new(
+                Some(source_directory.clone()),
+                None,
+                None,
+                super::read_directory(&source_directory).unwrap(),
+                None,
+            );
+            manager.browsers[1].tabs[0] = super::BrowserTab::new(
+                Some(destination_directory.clone()),
+                None,
+                None,
+                super::read_directory(&destination_directory).unwrap(),
+                None,
+            );
+            manager
+        });
+
+        let start = cx
+            .update(|window, _| {
+                window
+                    .find(gpui::SharedString::from(source.to_string_lossy().into_owned()))
+                    .bounds()
+                    .center()
+            });
+        let destination_bounds = cx.update(|window, _| {
+            window
+            .find(gpui::SharedString::from(target_file.to_string_lossy().into_owned()))
+                .bounds()
+        });
+        let end = destination_bounds.center();
+        cx.simulate_mouse_move(start, None, gpui::Modifiers::default());
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            start + gpui::point(gpui::px(20.0), gpui::px(0.0)),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.simulate_mouse_move(end, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let manager = view.read(cx);
+            let dark = manager.theme_mode.is_dark(window.appearance());
+            let color = manager.accent_color.color(dark);
+            assert!(window.painted_quads().iter().any(|quad| {
+                quad.background == gpui::rgba((color << 8) | 0x2a).into()
+                    && (quad.bounds.origin.y.0
+                        - f32::from(destination_bounds.top()) * window.scale_factor())
+                        .abs()
+                        < 1.0
+            }), "the destination list must visibly highlight while a file is dragged over it");
+            assert!(window.painted_quads().iter().any(|quad| {
+                quad.border_color == gpui::rgb(color).into()
+                    && (quad.bounds.origin.y.0
+                        - f32::from(destination_bounds.top()) * window.scale_factor())
+                        .abs()
+                        < 1.0
+            }), "the target folder row must show an accent border while hovered");
+        });
+        cx.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::default());
+
+        for _ in 0..16 {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+            if !cx.read(|cx| view.read(cx).file_actions.operations.is_busy()) {
+                break;
+            }
+        }
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"move between browsers");
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert_eq!(manager.active_browser, 1);
+            assert_eq!(
+                manager.browsers[1].tabs[0].current_directory.as_ref(),
+                Some(&destination_directory)
+            );
+            assert!(manager.browsers[1].tabs[0]
+                .entries
+                .iter()
+                .any(|entry| entry.name == "target-folder" && entry.is_directory));
+            assert!(manager.browsers[1].tabs[0]
+                .entries
+                .iter()
+                .any(|entry| entry.name == "existing.txt"));
+        });
+
+        let below_start = cx.update(|window, _| {
+            window
+                .find(gpui::SharedString::from(source_below.to_string_lossy().into_owned()))
+                .bounds()
+                .center()
+        });
+        let viewport = cx.debug_bounds("file-scroll-viewport-secondary").unwrap();
+        let last_row = cx.update(|window, _| {
+            [target_folder.clone(), target_file.clone(), destination.clone()]
+                .into_iter()
+                .map(|path| {
+                    window
+                        .find(gpui::SharedString::from(path.to_string_lossy().into_owned()))
+                        .bounds()
+                })
+                .reduce(|current, candidate| {
+                    if candidate.bottom() > current.bottom() { candidate } else { current }
+                })
+                .unwrap()
+        });
+        assert!(viewport.bottom() > last_row.bottom() + gpui::px(4.0));
+        let below_end = gpui::point(viewport.center().x, viewport.bottom() - gpui::px(3.0));
+        cx.simulate_mouse_move(below_start, None, gpui::Modifiers::default());
+        cx.simulate_mouse_down(below_start, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            below_start + gpui::point(gpui::px(20.0), gpui::px(0.0)),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.simulate_mouse_move(below_end, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        let marker_row = cx.read(|cx| view.read(cx).browsers[1].tabs[0].drop_marker_row);
+        assert_eq!(marker_row, Some(2));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let manager = view.read(cx);
+            let dark = manager.theme_mode.is_dark(window.appearance());
+            let color = manager.accent_color.color(dark);
+            let accent_borders: Vec<_> = window
+                .painted_quads()
+                .iter()
+                .filter(|quad| quad.border_color == gpui::rgb(color).into())
+                .map(|quad| quad.bounds)
+                .collect();
+            let row_top = f32::from(last_row.top()) * window.scale_factor();
+            let row_bottom = f32::from(last_row.bottom()) * window.scale_factor();
+            let row_left = f32::from(last_row.left()) * window.scale_factor();
+            let row_right = f32::from(last_row.right()) * window.scale_factor();
+            assert!(
+                accent_borders.iter().any(|bounds| {
+                    bounds.origin.y.0 <= row_bottom
+                        && bounds.bottom().0 >= row_top
+                        && bounds.origin.x.0 <= row_left + 1.0
+                        && bounds.right().0 >= row_right - 1.0
+                }),
+                "last row={last_row:?}, accent bounds={accent_borders:?}"
+            );
+        });
+        cx.simulate_mouse_up(below_end, gpui::MouseButton::Left, gpui::Modifiers::default());
+        for _ in 0..16 {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+            if !cx.read(|cx| view.read(cx).file_actions.operations.is_busy()) {
+                break;
+            }
+        }
+        assert!(!source_below.exists());
+        assert_eq!(std::fs::read(&destination_below).unwrap(), b"drop below the list");
     }
 
     #[gpui::test]
@@ -1329,7 +1903,10 @@ mod tests {
         let status = cx.debug_bounds("status-bar").unwrap();
         let main_panel = cx.debug_bounds("main-panel").unwrap();
         let file_list = cx.debug_bounds("file-list").unwrap();
-        assert_eq!(file_list.size.width, main_panel.size.width);
+        let secondary_file_list = cx.debug_bounds("file-list-secondary").unwrap();
+        let combined_width = file_list.size.width + secondary_file_list.size.width;
+        assert!(combined_width >= main_panel.size.width - gpui::px(8.0));
+        assert!(combined_width <= main_panel.size.width + gpui::px(8.0));
         assert!(cx.debug_bounds("file:file-999.txt").is_none());
         cx.read(|cx| {
             let manager = view.read(cx);

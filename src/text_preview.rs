@@ -54,6 +54,7 @@ impl ArchiveManager {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        self.inspector.select_or_create(Some(target.path.clone()));
         self.inspector.clear_text_preview();
         self.inspector.text_cancel = Arc::new(AtomicBool::new(false));
         self.inspector.visible = true;
@@ -251,6 +252,7 @@ impl ArchiveManager {
             .as_ref()
             .map(|password| password.as_str().to_owned());
         let resource = target.path.clone();
+        let browser_tab_id = self.active_browser_tab().id;
         self.background_queue.enqueue(
             "Saving file...",
             crate::task_queue::TaskControl::default().for_paths([resource]),
@@ -299,17 +301,21 @@ impl ArchiveManager {
                             window,
                             cx,
                         );
-                    } else if let (Some(directory), Ok(metadata)) =
-                        (manager.current_directory.as_ref(), std::fs::metadata(&target.path))
-                    {
-                        for entry in &mut manager.entries {
-                            let entry_path = directory.join(
-                                entry.source_path.as_deref().unwrap_or(&entry.name),
-                            );
-                            if entry_path == target.path {
-                                entry.size = metadata.len();
+                    } else {
+                        let _ = manager.with_browser_tab(browser_tab_id, |manager| {
+                            if let (Some(directory), Ok(metadata)) =
+                                (manager.current_directory.clone(), std::fs::metadata(&target.path))
+                            {
+                                for entry in &mut manager.entries {
+                                    let entry_path = directory.join(
+                                        entry.source_path.as_deref().unwrap_or(&entry.name),
+                                    );
+                                    if entry_path == target.path {
+                                        entry.size = metadata.len();
+                                    }
+                                }
                             }
-                        }
+                        });
                     }
                     manager.preview_text_target(&target, window, cx);
                 }
@@ -1712,7 +1718,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn text_preview_cancels_stale_reads_when_selection_changes(cx: &mut gpui::TestAppContext) {
+    fn text_preview_keeps_each_selection_in_its_inspector_tab(cx: &mut gpui::TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
         let first = directory.path().join("first.txt");
         let second = directory.path().join("second.txt");
@@ -1724,7 +1730,7 @@ mod tests {
                 let mut target = EntryTarget {
                     name: "first.txt".into(),
                     key: "first".into(),
-                    path: first,
+                    path: first.clone(),
                     archive_entry: None,
                     password: None,
                     is_directory: false,
@@ -1734,12 +1740,14 @@ mod tests {
                 target.name = "second.txt".into();
                 target.path = second;
                 manager.preview_text_target(&target, window, cx);
-                assert!(cancel.load(Ordering::Relaxed));
+                assert!(!cancel.load(Ordering::Relaxed));
             })
         });
         cx.run_until_parked();
         cx.read(|cx| {
             let manager = view.read(cx);
+            assert_eq!(manager.inspector.test_session_count(), 2);
+            assert!(manager.inspector.test_has_preview_for(&first));
             assert_eq!(
                 manager
                     .inspector

@@ -226,6 +226,8 @@ impl ShortcutSettings {
                     .any(|command| command.action().name() == binding.action().name())
                     && binding.action().name() != CancelRecording.name()
                     && binding.action().name() != RecordEnter.name()
+                    && binding.action().name()
+                        != crate::toolbar::key_actions::CloseBrowserTab.name()
             })
             .cloned()
             .collect();
@@ -253,6 +255,20 @@ impl ShortcutSettings {
                 .expect("validated shortcut")
             })
             .collect();
+        for context in ["Browser", "Inspector"] {
+            bindings.push(KeyBinding::new(
+                "ctrl-w",
+                crate::toolbar::key_actions::CloseBrowserTab,
+                Some(context),
+            ));
+            if cfg!(target_os = "macos") {
+                bindings.push(KeyBinding::new(
+                    "cmd-w",
+                    crate::toolbar::key_actions::CloseBrowserTab,
+                    Some(context),
+                ));
+            }
+        }
         if recording {
             bindings.extend([
                 KeyBinding::new("escape", CancelRecording, Some("ShortcutRecorder")),

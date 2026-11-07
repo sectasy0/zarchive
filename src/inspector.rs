@@ -17,6 +17,7 @@ use gpui::component::{
 };
 use gpui::component::menu::ContextMenuExt;
 use gpui::{Context, IntoElement, Window, div, prelude::*, px, rgb};
+use std::ops::{Deref, DerefMut};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -38,9 +39,17 @@ pub enum InspectorTab {
 
 /// Owns inspection jobs, reports, active selection, and panel state.
 pub struct Inspector {
+    sessions: Vec<InspectorSession>,
+    active_session: usize,
+    next_session_id: u64,
+    pub(crate) height: Option<gpui::Pixels>,
+    target_tabs_scroll: gpui::ScrollHandle,
+}
+
+pub struct InspectorSession {
+    id: u64,
     /// Whether the inspector panel is visible.
     pub visible: bool,
-    pub(crate) height: Option<gpui::Pixels>,
     /// Inspection mode used to produce the current reports.
     pub mode: InspectionMode,
     /// Currently selected inspector tab.
@@ -64,12 +73,12 @@ pub struct Inspector {
     task: Option<u64>,
 }
 
-impl Default for Inspector {
+impl Default for InspectorSession {
     /// Creates a hidden inspector with no reports or active inspection task.
     fn default() -> Self {
         Self {
+            id: 0,
             visible: false,
-            height: None,
             mode: InspectionMode::Preview,
             tab: InspectorTab::Overview,
             reports: Vec::new(),
@@ -89,7 +98,136 @@ impl Default for Inspector {
     }
 }
 
+impl Default for Inspector {
+    fn default() -> Self {
+        Self {
+            sessions: vec![InspectorSession::default()],
+            active_session: 0,
+            next_session_id: 1,
+            height: None,
+            target_tabs_scroll: gpui::ScrollHandle::new(),
+        }
+    }
+}
+
+impl Deref for Inspector {
+    type Target = InspectorSession;
+
+    fn deref(&self) -> &Self::Target {
+        &self.sessions[self.active_session]
+    }
+}
+
+impl DerefMut for Inspector {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.sessions[self.active_session]
+    }
+}
+
 impl Inspector {
+    pub(crate) fn select_or_create(&mut self, source: Option<PathBuf>) -> u64 {
+        let existing = source.as_ref().and_then(|source| {
+            self.sessions
+                .iter()
+                .position(|session| session.source.as_ref() == Some(source))
+        });
+        let index = existing.unwrap_or_else(|| {
+            let active_is_empty = self.sessions[self.active_session].source.is_none()
+                && self.sessions[self.active_session].reports.is_empty()
+                && self.sessions[self.active_session].text_preview.is_none();
+            if active_is_empty {
+                self.active_session
+            } else {
+                let id = self.next_session_id;
+                self.next_session_id = self.next_session_id.wrapping_add(1);
+                let mut session = InspectorSession::default();
+                session.id = id;
+                self.sessions.push(session);
+                self.sessions.len() - 1
+            }
+        });
+        self.active_session = index;
+        self.target_tabs_scroll.scroll_to_item(index);
+        let session = &mut self.sessions[index];
+        session.source = source;
+        session.visible = true;
+        session.id
+    }
+
+    fn active_session_id(&self) -> u64 {
+        self.sessions[self.active_session].id
+    }
+
+    fn session_mut(&mut self, id: u64) -> Option<&mut InspectorSession> {
+        self.sessions.iter_mut().find(|session| session.id == id)
+    }
+
+    fn activate(&mut self, id: u64) {
+        if let Some(index) = self.sessions.iter().position(|session| session.id == id) {
+            self.active_session = index;
+            self.sessions[index].visible = true;
+            self.target_tabs_scroll.scroll_to_item(index);
+        }
+    }
+
+    fn close_tab(&mut self, index: usize) {
+        if self.sessions.len() <= 1 || index >= self.sessions.len() {
+            self.close();
+            return;
+        }
+        self.sessions.remove(index);
+        if self.active_session > index {
+            self.active_session -= 1;
+        } else if self.active_session == index {
+            self.active_session = index.min(self.sessions.len() - 1);
+        }
+        self.target_tabs_scroll.scroll_to_item(self.active_session);
+        self.sessions[self.active_session].visible = true;
+    }
+
+    pub(crate) fn close_active_tab(&mut self) {
+        self.close_tab(self.active_session);
+    }
+
+    fn tab_label(&self, index: usize, language: crate::i18n::Language) -> String {
+        let session = &self.sessions[index];
+        session
+            .source
+            .as_deref()
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+            .or_else(|| session.source.as_deref().map(|path| path.display().to_string()))
+            .unwrap_or_else(|| language.text("Inspector").to_owned())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_session_count(&self) -> usize {
+        self.sessions.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_has_preview_for(&self, source: &Path) -> bool {
+        self.sessions.iter().any(|session| {
+            session.source.as_deref() == Some(source) && session.text_preview.is_some()
+        })
+    }
+
+    fn reset_active(&mut self) {
+        self.passwords.clear();
+        self.clear_text_preview();
+        self.text_cancel = Arc::new(AtomicBool::new(false));
+        self.cancel.store(true, Ordering::Relaxed);
+        self.cancel = Arc::new(AtomicBool::new(false));
+        self.task = None;
+        self.entries_view = None;
+        self.findings_view = None;
+        self.reports.clear();
+        self.active = 0;
+        self.selected_name = None;
+        self.batch_limited = false;
+        self.revision = self.revision.wrapping_add(1);
+    }
+
     pub(crate) fn preview_height(&self, window_height: gpui::Pixels) -> gpui::Pixels {
         let maximum = (window_height - px(220.0)).max(px(80.0));
         self.height.unwrap_or((window_height * 0.4).min(px(258.0))).clamp(px(80.0), maximum)
@@ -114,14 +252,21 @@ impl Inspector {
         self.entries_view = None;
         self.findings_view = None;
         self.visible = false;
-        self.source = None;
         self.revision = self.revision.wrapping_add(1);
     }
 
 }
 
 impl Drop for Inspector {
-    /// Signals the worker to stop if the inspector is dropped.
+    fn drop(&mut self) {
+        for session in &self.sessions {
+            session.cancel.store(true, Ordering::Relaxed);
+            session.text_cancel.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Drop for InspectorSession {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
         self.text_cancel.store(true, Ordering::Relaxed);
@@ -263,17 +408,15 @@ impl ArchiveManager {
         } else {
             Vec::new()
         };
-        self.inspector.close();
+        let target_source = (sources.len() == 1).then(|| sources[0].0.clone());
+        self.inspector.select_or_create(target_source.clone());
+        self.inspector.reset_active();
         self.inspector.passwords = sources.iter().cloned().collect();
         self.inspector.batch_limited = sources.len() > 32 && !mode.is_full_audit();
         if !mode.is_full_audit() {
             sources.truncate(32);
         }
-        self.inspector.source = if sources.len() == 1 {
-            Some(sources[0].0.clone())
-        } else {
-            None
-        };
+        self.inspector.source = target_source;
         self.inspector.visible = true;
         self.inspector.mode = mode;
         self.inspector.active = 0;
@@ -293,6 +436,7 @@ impl ArchiveManager {
         let control = crate::task_queue::TaskControl::with_cancel(cancel.clone()).for_paths(sources.iter().map(|(path, _)| path.clone()));
         let total = sources.len() as u64;
         let revision = self.inspector.revision;
+        let session_id = self.inspector.active_session_id();
         let audit_options = inspection::AuditOptions { max_depth: self.advanced_settings.audit_max_depth.min(8) as u8 };
         self.inspector.task = Some(self.background_queue.enqueue(
             "Inspecting archive...",
@@ -347,10 +491,11 @@ impl ArchiveManager {
             Ok(reports)
             },
             move |this, result, _, cx| {
-                if this.inspector.revision != revision || !this.inspector.visible { return; }
-                this.inspector.task = None;
+                let Some(session) = this.inspector.session_mut(session_id) else { return; };
+                if session.revision != revision || !session.visible { return; }
+                session.task = None;
                 if let Ok(reports) = result {
-                    this.inspector.reports = reports.into_iter().map(Arc::new).collect();
+                    session.reports = reports.into_iter().map(Arc::new).collect();
                 }
                 cx.notify();
             },
@@ -1065,6 +1210,27 @@ mod tests {
         assert_eq!(bundle["batch_limited"], false);
         assert_eq!(bundle["reports"][0]["full_audit"], true);
         assert_eq!(bundle["reports"][0]["limits"]["max_entries"], serde_json::Value::Null);
+    }
+
+    #[gpui::test]
+    fn inspector_targets_open_as_independent_tabs(cx: &mut gpui::TestAppContext) {
+        let first = PathBuf::from("first.zip");
+        let second = PathBuf::from("second.zip");
+        let (view, cx) = crate::tests::component_window(cx, |_, cx| {
+            let mut manager = crate::tests::test_manager(cx);
+            manager.inspector.select_or_create(Some(first.clone()));
+            manager.inspector.select_or_create(Some(second.clone()));
+            manager
+        });
+        assert!(cx.debug_bounds("inspector-target-tabs").is_some());
+        let first_tab = cx.debug_bounds("inspector-target-tab:0").unwrap();
+        cx.simulate_click(first_tab.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert_eq!(manager.inspector.source.as_ref(), Some(&first));
+            assert_eq!(manager.inspector.sessions.len(), 2);
+        });
     }
 
     #[gpui::test]
@@ -2070,12 +2236,148 @@ mod tests {
 }
 
 /// Renders the inspector panel and its active overview, entries, or findings view.
+fn target_tabs(
+    manager: &ArchiveManager,
+    language: crate::i18n::Language,
+    theme: Theme,
+    cx: &mut Context<ArchiveManager>,
+) -> impl IntoElement {
+    let active = manager.inspector.active_session;
+    let tabs: Vec<_> = manager
+        .inspector
+        .sessions
+        .iter()
+        .enumerate()
+        .map(|(index, session)| {
+            let icon = session
+                .source
+                .as_deref()
+                .map(|path| {
+                    if crate::archive::is_supported_archive(path) {
+                        "archive"
+                    } else if path.is_dir() {
+                        "folder"
+                    } else {
+                        "file"
+                    }
+                })
+                .unwrap_or("file");
+            (
+                index,
+                session.id,
+                manager.inspector.tab_label(index, language),
+                icon,
+            )
+        })
+        .collect();
+    let mut bar = div()
+        .id("inspector-target-tabs")
+        .debug_selector(|| "inspector-target-tabs".to_owned())
+        .flex()
+        .items_center()
+        .gap_0()
+        .h(px(30.0))
+        .flex_shrink_0()
+        .border_b_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(theme.sidebar));
+    let tab_items = tabs.iter().cloned().map(|(index, id, label, icon)| {
+        let activate = cx.listener(move |this, _, _, cx| {
+            this.inspector.activate(id);
+            this.inspector_focus = true;
+            cx.notify();
+        });
+        let selected = index == active;
+        let tab_selector = format!("inspector-target-tab:{id}");
+        let mut tab = div()
+            .id(format!("inspector-target-tab-group-{id}"))
+            .debug_selector(move || tab_selector.clone())
+            .relative()
+            .flex()
+            .items_center()
+            .gap_1()
+            .min_w(px(90.0))
+            .max_w(px(180.0))
+            .h(px(30.0))
+            .flex_shrink_0()
+            .px_2()
+            .border_r_1()
+            .border_color(rgb(theme.border))
+            .bg(rgb(if selected { theme.surface } else { theme.titlebar }))
+            .text_color(rgb(if selected { theme.text } else { theme.muted_text }))
+            .text_xs()
+            .cursor_pointer()
+            .on_click(activate)
+            .when(!selected, |tab| {
+                tab.hover(|style| {
+                    style
+                        .bg(rgb(theme.hover))
+                        .border_color(rgb(theme.border))
+                        .text_color(rgb(theme.text))
+                })
+            })
+            .child(crate::app_icon(
+                icon,
+                13.0,
+                if selected { theme.accent } else { theme.icon },
+            ))
+            .child(div().flex_1().min_w(px(0.0)).truncate().child(label));
+        if tabs.len() > 1 {
+            let close = cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.inspector.close_tab(index);
+                cx.notify();
+            });
+            tab = tab.child(
+                Button::new(format!("close-inspector-target-tab-{id}"))
+                    .ghost()
+                    .xsmall()
+                    .w(px(18.0))
+                    .h(px(18.0))
+                    .flex_shrink_0()
+                    .icon(gpui::assets::IconName::X)
+                    .tooltip(language.text("Close"))
+                    .on_click(close),
+            );
+        }
+        if selected {
+            tab = tab.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(2.0))
+                    .bg(rgb(theme.accent)),
+            );
+        }
+        tab.into_any_element()
+    });
+    let scroll_selector = "inspector-target-tabs-scroll";
+    let tab_scroll = div()
+        .id("inspector-target-tabs-scroll")
+        .debug_selector(|| scroll_selector.to_owned())
+        .flex()
+        .items_center()
+        .gap_0()
+        .flex_1()
+        .min_w(px(0.0))
+        .h(px(30.0))
+        .track_scroll(&manager.inspector.target_tabs_scroll)
+        .overflow_x_scroll()
+        .children(tab_items);
+    bar = bar.child(tab_scroll);
+    bar
+}
+
+/// Renders the inspector panel and its active overview, entries, or findings view.
 pub fn view(
     manager: &mut ArchiveManager,
     theme: Theme,
     height: gpui::Pixels,
     cx: &mut Context<ArchiveManager>,
 ) -> impl IntoElement {
+    let language = manager.language;
     if let Some(preview) = manager.inspector.text_preview.clone() {
         preview.update(cx, |preview, cx| {
             if preview.theme.window != theme.window || preview.theme.accent != theme.accent || preview.language != manager.language {
@@ -2085,10 +2387,19 @@ pub fn view(
             }
         });
         return div().id("archive-inspector").debug_selector(|| "archive-inspector".to_owned())
+            .flex().flex_col()
             .h(height).min_h(px(0.0)).flex_shrink_0()
-            .border_t_1().border_color(rgb(theme.border)).child(preview).into_any_element();
+            .border_t_1().border_color(rgb(theme.border))
+            .child(target_tabs(manager, language, theme, cx))
+            .child(preview)
+            .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| {
+                if !this.inspector_focus {
+                    this.inspector_focus = true;
+                    cx.notify();
+                }
+            }))
+            .into_any_element();
     }
-    let language = manager.language;
     let manager_view = cx.entity().downgrade();
     let busy = !manager.archive_drop_enabled();
     let entries_view = if manager.inspector.tab == InspectorTab::Entries {
@@ -2343,6 +2654,7 @@ pub fn view(
     };
     div().id("archive-inspector").debug_selector(|| "archive-inspector".into()).flex().flex_col()
         .h(height).min_h(px(0.0)).flex_shrink_0().border_t_1().border_color(rgb(theme.border)).bg(rgb(theme.surface))
+        .child(target_tabs(manager, language, theme, cx))
         .child(div().flex().flex_wrap().items_center().gap_2().min_h(px(34.0)).flex_shrink_0().px_2().border_b_1().border_color(rgb(theme.border))
             .children([(InspectorTab::Overview, "Overview"), (InspectorTab::Entries, "Entries"), (InspectorTab::Findings, "Audit findings")].into_iter().map(|(tab, label)| {
                 let text = if tab == InspectorTab::Findings && audit_findings_count > 0 {
@@ -2359,6 +2671,7 @@ pub fn view(
                     button
                 };
                 button.on_click(cx.listener(move |this, _, _, cx| {
+                    this.inspector_focus = true;
                     this.inspector.tab = tab;
                     if tab == InspectorTab::Findings {
                         if let Some(pane) = &this.inspector.findings_view {

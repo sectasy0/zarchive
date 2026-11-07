@@ -10,6 +10,14 @@ pub(crate) struct ArchiveFileDrag {
     pub theme: Theme,
 }
 
+pub(crate) fn archive_drop_feedback_color(theme: Theme) -> u32 {
+    if theme.window < 0x808080 {
+        0x4ade80
+    } else {
+        0x15803d
+    }
+}
+
 impl Render for ArchiveFileDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div().flex().items_center().gap_2().px_3().py_2().max_w(px(280.0))
@@ -27,19 +35,20 @@ pub(crate) fn archive_drop_area(
     enabled: bool,
     cx: &mut Context<ArchiveManager>,
 ) -> gpui::Stateful<gpui::Div> {
+    let feedback_color = archive_drop_feedback_color(theme);
     let hover_target = destination.clone();
     let external_hover = destination.clone();
     let external_target = destination.clone();
     area.border_2().border_color(gpui::transparent_black())
     .drag_over::<ArchiveFileDrag>(move |style, drag, _, _| {
         let accepted = enabled && accepts_archive_drop(&hover_target, std::slice::from_ref(&drag.target.path));
-        style.bg(gpui::rgba(if accepted { (theme.accent << 8) | 0x2a } else { 0xef44441a }))
-            .border_color(rgb(if accepted { theme.accent } else { 0xef4444 }))
+        style.bg(gpui::rgba(if accepted { (feedback_color << 8) | 0x2a } else { 0xef44441a }))
+            .border_color(rgb(if accepted { feedback_color } else { 0xef4444 }))
     })
     .drag_over::<gpui::ExternalPaths>(move |style, paths, _, _| {
         let accepted = enabled && accepts_archive_drop(&external_hover, paths.paths());
-        style.bg(gpui::rgba(if accepted { (theme.accent << 8) | 0x2a } else { 0xef44441a }))
-            .border_color(rgb(if accepted { theme.accent } else { 0xef4444 }))
+        style.bg(gpui::rgba(if accepted { (feedback_color << 8) | 0x2a } else { 0xef44441a }))
+            .border_color(rgb(if accepted { feedback_color } else { 0xef4444 }))
     })
     .on_drop(cx.listener(move |manager, drag: &ArchiveFileDrag, window, cx| {
         cx.stop_propagation();
@@ -310,11 +319,18 @@ mod tests {
             window.draw(cx).clear(cx);
             let manager = view.read(cx);
             let dark = manager.theme_mode.is_dark(window.appearance());
-            let color = manager.accent_color.color(dark);
+            let color = archive_drop_feedback_color(Theme::new(dark));
             assert!(window.painted_quads().iter().any(|quad| {
                 quad.background == gpui::rgba((color << 8) | 0x2a).into()
                     && (quad.bounds.origin.y.0 - f32::from(destination_bounds.top()) * window.scale_factor()).abs() < 1.0
             }), "the destination must visibly react while hovered by a dragged file");
+            assert!(window.painted_quads().iter().any(|quad| {
+                quad.border_color == gpui::rgb(color).into()
+                    && (quad.bounds.origin.y.0
+                        - f32::from(destination_bounds.top()) * window.scale_factor())
+                        .abs()
+                        < 1.0
+            }), "the hovered destination row must show an accent border");
         });
         cx.simulate_mouse_up(destination_bounds.center(), gpui::MouseButton::Left, gpui::Modifiers::default());
         finish_addition(&view, cx);

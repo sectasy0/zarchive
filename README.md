@@ -19,16 +19,20 @@ available while your files are processed.
 
 ## Features
 
-- **Browse before extracting.** Navigate folders and archives, use Back and
-  Forward history, browse the folder tree, sort by name, type, or size, and open
-  individual files in their default desktop applications. Up/Down selects rows;
-  Right enters a folder and Left moves to its parent. Selection follows the
-  visible search results, filters, and sorting without opening a preview.
+- **Browse before extracting.** The workspace opens with two side-by-side
+  browsers. Each has independent tabs for folders and archives, Back and Forward
+  history, sorting, search, filters, and selection. Navigate the folder tree,
+  sort by name, type, or size, and open individual files in their default desktop
+  applications. Up/Down selects rows; Right enters a folder and Left moves to
+  its parent. Selection follows visible search results, filters, and sorting
+  without opening a preview.
 - **Preview and edit text without extracting.** Select a text file on disk,
   an archive entry, or a standalone compressed text file, then press Space or
   choose **Inspector** from its context menu to preview it in the
-  bottom panel. UTF-8 and BOM-marked UTF-16 are supported, with syntax
-  highlighting, line numbers, searching, scrolling, and copying. Choose Edit to
+  bottom panel. Inspections and previews are retained in separate tabs there;
+  each archive tab keeps its Overview, Entries, and Findings views. UTF-8 and
+  BOM-marked UTF-16 are supported, with syntax highlighting, line numbers,
+  searching, scrolling, and copying. Choose Edit to
   modify local files or supported archive entries, then Save or Cancel. CSV table
   previews can switch to the text editor for editing when the target is writable.
   Archive changes use private staging and do not create an extracted copy in the
