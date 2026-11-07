@@ -49,6 +49,7 @@ pub enum EntryAction {
     Extract,
     ExtractArchive,
     ExtractHere,
+    ConvertArchive,
     MoveTo,
     Inspect,
     TestIntegrity,
@@ -66,6 +67,7 @@ impl EntryAction {
             Self::Extract => "Extract file",
             Self::ExtractArchive => "Extract archive to...",
             Self::ExtractHere => "Extract here",
+            Self::ConvertArchive => "Convert archive...",
             Self::MoveTo => "Move to...",
             Self::Inspect => "Inspector",
             Self::TestIntegrity => "Test integrity",
@@ -83,6 +85,7 @@ impl EntryAction {
             Self::Extract => IconName::Download.into(),
             Self::ExtractArchive => IconName::FolderOutput.into(),
             Self::ExtractHere => IconName::Download.into(),
+            Self::ConvertArchive => IconName::GitCompare.into(),
             Self::MoveTo => IconName::FolderInput.into(),
             Self::Inspect => IconName::FileSearch.into(),
             Self::TestIntegrity => IconName::ShieldCheck.into(),
@@ -102,7 +105,11 @@ impl EntryTarget {
         }
         if self.archive_entry.is_none() {
             if !self.is_directory && archive::is_supported_archive(&self.path) {
-                actions.extend([EntryAction::ExtractHere, EntryAction::ExtractArchive]);
+                actions.extend([
+                    EntryAction::ExtractHere,
+                    EntryAction::ExtractArchive,
+                    EntryAction::ConvertArchive,
+                ]);
                 actions.extend([
                     EntryAction::TestIntegrity,
                     EntryAction::Audit,
@@ -361,7 +368,7 @@ fn context_menu_groups(target: &EntryTarget) -> Vec<Vec<EntryAction>> {
     let available = target.actions();
     let groups: &[&[EntryAction]] = &[
         &[Open],
-        &[CreateArchive, ExtractHere, ExtractArchive, Extract],
+        &[CreateArchive, ExtractHere, ExtractArchive, ConvertArchive, Extract],
         &[Inspect, TestIntegrity, Audit],
         &[CopyPath, MoveTo],
         &[Trash],
@@ -418,6 +425,7 @@ pub fn menu(
                             | EntryAction::MoveTo
                             | EntryAction::ExtractArchive
                             | EntryAction::ExtractHere
+                            | EntryAction::ConvertArchive
                     ),
                 )
                 .on_click(move |_, window, cx| {
@@ -431,6 +439,7 @@ pub fn menu(
                         EntryAction::ExtractHere => {
                             this.request_extract_archive(&target, true, window, cx)
                         }
+                        EntryAction::ConvertArchive => this.open_conversion(window, cx),
                         EntryAction::MoveTo => this.request_move(&target, window, cx),
                         EntryAction::Inspect => this.preview_archive_target(&target, window, cx),
                         EntryAction::TestIntegrity | EntryAction::Audit => {
@@ -592,7 +601,7 @@ mod tests {
         };
         assert_eq!(context_menu_groups(&target), vec![
             vec![Open],
-            vec![CreateArchive, ExtractHere, ExtractArchive],
+            vec![CreateArchive, ExtractHere, ExtractArchive, ConvertArchive],
             vec![Inspect, TestIntegrity, Audit],
             vec![CopyPath, MoveTo],
             vec![Trash],
@@ -691,7 +700,6 @@ mod tests {
         cx.simulate_keystrokes("escape");
         cx.read(|cx| assert!(view.read(cx).file_actions.pending_delete.is_none()));
         assert!(path.exists());
-
         cx.update(|window, cx| window.right_click("file-list", cx));
         choose_menu_item(cx, "Create archive");
         cx.read(|cx| assert!(view.read(cx).creation.sources.is_empty()));
@@ -719,6 +727,37 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn context_menu_opens_conversion_for_the_selected_archive(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::test::TestWindowExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("source.zip");
+        std::fs::write(&path, b"archive").unwrap();
+        let (view, cx) = crate::tests::component_window(cx, |_, cx| {
+            let mut manager = crate::tests::test_manager(cx);
+            manager.current_directory = Some(directory.path().to_path_buf());
+            manager.entries = vec![archive::ArchiveEntry {
+                name: "source.zip".into(),
+                source_path: None,
+                size: 7,
+                is_directory: false,
+                modified: None,
+                is_encrypted: false,
+            }];
+            manager
+        });
+
+        cx.update(|window, cx| window.right_click("source.zip", cx));
+        choose_menu_item(cx, "Convert archive...");
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert!(matches!(manager.modal, Some(Modal::Conversion)));
+            assert_eq!(manager.selected_entry.as_deref(), Some("source.zip"));
+        });
+    }
+
     #[test]
     /// Checks that menu icon assets resolve through the application asset registry.
     fn context_menu_icons_are_available_from_registered_assets() {
@@ -731,6 +770,7 @@ mod tests {
             IconName::FileSearch,
             IconName::ShieldCheck,
             IconName::ScanSearch,
+            IconName::GitCompare,
             IconName::Copy,
             IconName::Trash,
             IconName::RefreshCw,

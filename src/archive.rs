@@ -31,7 +31,8 @@ use read::{extract_extended_entry, extract_extended_tree, open_seven_zip, open_t
 mod extract;
 pub use extract::{extract_archive_selection_to, extract_archive_to, extract_entry, extract_entry_with_password};
 pub(crate) use extract::{read_entry_from_offset, read_entry_prefix_with_limit};
-use extract::{safe_extraction_path, write_extracted_entry};
+pub(crate) use extract::{safe_extraction_path, read_entry_range_with_budget};
+use extract::write_extracted_entry;
 #[cfg(test)]
 use extract::temporary_suffix;
 

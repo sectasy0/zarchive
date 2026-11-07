@@ -62,6 +62,25 @@ available while your files are processed.
   methods and levels, include hidden files, force ZIP64, or tune 7z dictionary and
   solid-compression settings. Encrypt ZIP and 7z archives, optionally encrypt 7z
   filenames, and extract entire archives or selected entries.
+- **Convert archives with explicit loss warnings.** Choose **Files > Convert
+  archive...**, select a target format, analyze the source and acknowledge the
+  listed losses before saving. ZIP, 7z, TAR and its supported compressed variants,
+  CPIO, AR, PAX and XAR can be converted in either direction; RAR output requires
+  the external `rar` command-line tool. Standalone compressed streams can also be
+  read and packaged into a target archive. Conversion preserves file bytes,
+  names, hidden files and empty directories, but reads and rewrites content using
+  target defaults rather than copying compressed records. Original timestamps,
+  permissions, ownership, ACLs, extended attributes, comments and format-specific
+  fields are not transferred. Checksums are recalculated; signatures, recovery
+  records and external PAR2/REV sidecars do not carry over. Source encryption and
+  volume boundaries are not retained: the result is one **unencrypted** archive.
+  Passwords unlock only the source. AR rejects folders and nested paths instead
+  of flattening them. Links, unsafe or duplicate paths, unreadable content and
+  incomplete analysis block conversion. Limits are 10,000 entries, 128 MiB per
+  file and 512 MiB of file contents in total. Work uses private temporary staging
+  on the destination filesystem, so free disk space is needed for extracted
+  contents and the new archive. Source integrity is checked before publication;
+  existing destinations are never overwritten and the source is unchanged.
 - **Manage background tasks.** A shared queue runs up to three tasks concurrently.
   Open the task indicator beside the status-bar error counters to view progress,
   pause, resume, cancel, or clear finished tasks. Extraction, archive creation and

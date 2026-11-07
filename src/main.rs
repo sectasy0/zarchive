@@ -1,4 +1,5 @@
 mod archive;
+mod conversion;
 mod shortcuts;
 mod app;
 mod xar;
@@ -73,6 +74,7 @@ enum Modal {
     /// Selects two archives and displays their comparison report.
     CompareArchives,
     Recovery,
+    Conversion,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -220,6 +222,7 @@ struct ArchiveManager {
     inspector: inspector::Inspector,
     comparison_dialog: inspector::ComparisonDialog,
     recovery: recovery::State,
+    conversion: conversion::State,
     background_queue: task_queue::BackgroundQueue,
 }
 
@@ -494,6 +497,9 @@ impl ArchiveManager {
         if self.modal == Some(Modal::Recovery) {
             self.clear_recovery(window, cx);
         }
+        if self.modal == Some(Modal::Conversion) {
+            self.clear_conversion(window, cx);
+        }
         self.modal = None;
         window.focus(&self.content_focus, cx);
         cx.notify();
@@ -761,6 +767,7 @@ fn main() {
                             inspector: inspector::Inspector::default(),
                             comparison_dialog: inspector::ComparisonDialog::default(),
                             recovery: recovery::State::new(cx),
+                            conversion: conversion::State::new(cx),
                             background_queue: task_queue::BackgroundQueue::default(),
                         }
                     })
@@ -901,6 +908,7 @@ mod tests {
             inspector: crate::inspector::Inspector::default(),
             comparison_dialog: crate::inspector::ComparisonDialog::default(),
             recovery: crate::recovery::State::new(cx),
+            conversion: crate::conversion::State::new(cx),
             background_queue: crate::task_queue::BackgroundQueue::default(),
         }
     }

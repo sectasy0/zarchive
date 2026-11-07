@@ -635,6 +635,7 @@ pub(crate) fn modal_view(
         Modal::CreateArchive => "Create archive",
         Modal::CompareArchives => "Compare archives",
         Modal::Recovery => "Archive Repair & Recovery",
+        Modal::Conversion => "Convert archive",
         Modal::Password => "Archive password",
         Modal::Delete => if manager.file_actions.pending_delete.as_ref().is_some_and(|target| target.archive_entry.is_some()) {
             "Remove from archive"
@@ -659,6 +660,9 @@ pub(crate) fn modal_view(
         }
         Modal::Recovery => {
             content = content.child(crate::recovery::view(manager, theme, window, cx));
+        }
+        Modal::Conversion => {
+            content = content.child(crate::conversion::view(manager, theme, cx));
         }
         Modal::CompareArchives => {
             content = content
@@ -779,6 +783,7 @@ pub(crate) fn modal_view(
         Modal::Password => password::footer(manager, cx).into_any_element(),
         Modal::CreateArchive => creation::footer(manager, cx).into_any_element(),
         Modal::Recovery => crate::recovery::footer(manager, cx).into_any_element(),
+        Modal::Conversion => crate::conversion::footer(manager, cx).into_any_element(),
         Modal::CompareArchives => {
             crate::inspector::comparison_footer(manager, cx).into_any_element()
         }
@@ -789,6 +794,7 @@ pub(crate) fn modal_view(
             Modal::Settings => 620.0,
             Modal::CompareArchives => 900.0,
             Modal::Recovery => 800.0,
+            Modal::Conversion => 760.0,
             _ => 460.0,
         }))
         .overlay_closable(modal != Modal::Password)
@@ -801,6 +807,7 @@ pub(crate) fn modal_view(
                 Some(Modal::Password) => this.unlock_archive(window, cx),
                 Some(Modal::CreateArchive) => this.submit_archive(window, cx),
                 Some(Modal::Recovery) => this.start_recovery(cx),
+                Some(Modal::Conversion) => this.analyze_conversion(cx),
                 Some(Modal::CompareArchives) => this.start_archive_comparison(cx),
                 Some(Modal::Delete) => this.confirm_delete(window, cx),
                 _ => {}

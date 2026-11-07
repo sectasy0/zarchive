@@ -33,6 +33,18 @@ pub(super) fn read_entry_range(
     offset: usize,
     max_bytes: usize,
 ) -> Result<Vec<u8>> {
+    read_entry_range_with_budget(path, entry_name, password, cancel, offset, max_bytes, 64 * 1024 * 1024)
+}
+
+pub(crate) fn read_entry_range_with_budget(
+    path: &Path,
+    entry_name: &str,
+    password: Option<&str>,
+    cancel: &std::sync::atomic::AtomicBool,
+    offset: usize,
+    max_bytes: usize,
+    read_budget: u64,
+) -> Result<Vec<u8>> {
     use crate::text_preview::{GuardedReader, read_from_offset, read_prefix_with_limit};
     use std::{cell::Cell, sync::atomic::Ordering};
     fn read_entry_bytes(
@@ -49,7 +61,7 @@ pub(super) fn read_entry_range(
     }
 
     let format = ResolvedFormat::from_path(path).context("Unsupported archive format")?;
-    let budget = Cell::new(64 * 1024 * 1024);
+    let budget = Cell::new(read_budget);
     let guarded = |reader| GuardedReader {
         reader,
         cancel,
@@ -101,7 +113,7 @@ pub(super) fn read_entry_range(
         ResolvedFormat::SevenZip => {
             let file = open_archive_reader(path)?;
             let length = file.len();
-            let input_budget = Cell::new(64 * 1024 * 1024);
+            let input_budget = Cell::new(read_budget);
             let reader = GuardedReader {
                 reader: file,
                 cancel,
@@ -516,7 +528,7 @@ pub fn extract_archive_selection_to(
 }
 
 /// Normalizes an archive path and rejects absolute, drive-qualified, or parent-traversal paths.
-pub(super) fn safe_extraction_path(name: &str) -> Result<PathBuf> {
+pub(crate) fn safe_extraction_path(name: &str) -> Result<PathBuf> {
     let normalized = name.replace('\\', "/");
     anyhow::ensure!(
         !normalized.starts_with('/') && !normalized.contains(':') && !normalized.contains('\0'),

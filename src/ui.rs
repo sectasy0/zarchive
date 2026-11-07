@@ -29,6 +29,7 @@ pub enum Selector {
     VolumeSize,
     VolumeUnit,
     RecoveryPercent,
+    ConversionFormat,
 }
 
 /// Retains selector options, selected index, and its event subscription.
@@ -126,6 +127,7 @@ impl Controls {
                         Selector::RecoveryPercent => {
                             this.creation.apply(ChoiceField::RecoveryPercent, index)
                         }
+                        Selector::ConversionFormat => this.conversion.set_target(index),
                     }
                     cx.notify();
                 }
@@ -410,6 +412,11 @@ pub fn prepare(
         window,
         cx,
     );
+    manager.controls.sync(
+        Selector::ConversionFormat,
+        crate::conversion::FORMATS.iter().map(|format| format.label().into()).collect(),
+        manager.conversion.target_index(), window, cx,
+    );
 }
 
 /// Renders one retained selector with its localized accessibility label.
@@ -424,6 +431,7 @@ pub fn select(manager: &ArchiveManager, selector: Selector) -> impl IntoElement 
         Selector::VolumeSize => ("creation-volume-size", "Volume size"),
         Selector::VolumeUnit => ("creation-volume-unit", "Size unit"),
         Selector::RecoveryPercent => ("creation-parity-percent", "Recovery data"),
+        Selector::ConversionFormat => ("conversion-target-format", "Target format"),
     };
     let selected = match &control.state {
         SelectStateHandle::Flat(state) => Select::new(state)

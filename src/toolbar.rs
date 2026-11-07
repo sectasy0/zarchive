@@ -844,6 +844,7 @@ pub(crate) fn toolbox_bar(
             .dropdown_menu(move |menu, _, _| {
                 let open_view = files_view.clone();
                 let create_view = files_view.clone();
+                let conversion_view = files_view.clone();
                 menu.min_w(px(220.0))
                     .item(
                         PopupMenuItem::new(language.text("Open archive..."))
@@ -868,6 +869,12 @@ pub(crate) fn toolbox_bar(
                                 });
                             }),
                     )
+                    .separator()
+                    .item(PopupMenuItem::new(language.text("Convert archive..."))
+                        .icon(spaced_icon(gpui::assets::IconName::ArrowRightLeft))
+                        .on_click(move |_, window, cx| {
+                            let _ = conversion_view.update(cx, |manager, cx| manager.open_conversion(window, cx));
+                        }))
             }),
         )
         .child(
