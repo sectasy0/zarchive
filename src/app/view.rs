@@ -468,7 +468,28 @@ impl Render for ArchiveManager {
                     this.receive_external_paths(paths.paths(), window, cx);
                 }),
             )
-            .child(
+            .child(if cfg!(target_os = "windows") {
+                div()
+                    .id("windows-titlebar")
+                    .flex()
+                    .items_center()
+                    .h(px(44.0))
+                    .bg(rgb(theme.titlebar))
+                    .border_b_1()
+                    .border_color(rgb(theme.subtle_border))
+                    .child(toolbar::toolbox_bar(
+                        self,
+                        language,
+                        theme,
+                        self.can_navigate_back(),
+                        self.can_navigate_forward(),
+                        self.can_extract_current_archive(),
+                        self.inspection_target().is_some(),
+                        cx,
+                    ))
+                    .child(toolbar::windows_titlebar_controls(window, theme))
+                    .into_any_element()
+            } else {
                 TitleBar::new()
                     .h(px(44.0))
                     .pl(if cfg!(target_os = "macos") && !window.is_fullscreen() {
@@ -486,8 +507,9 @@ impl Render for ArchiveManager {
                         self.can_extract_current_archive(),
                         self.inspection_target().is_some(),
                         cx,
-                    )),
-            )
+                    ))
+                    .into_any_element()
+            })
             .child(
                 div()
                     .flex()
@@ -2317,8 +2339,9 @@ pub(crate) fn file_icon(extension: &str) -> &'static str {
         "rs" | "c" | "h" | "cpp" | "py" | "js" | "ts" | "go" | "java" | "html" | "css" => "code",
         "txt" | "md" | "rtf" | "doc" | "docx" | "odt" => "document",
         "csv" => "csv",
-        "xls" | "xlsx" | "ods" => "table",
-        "ppt" | "pptx" | "odp" => "presentation",
+        "xls" | "xlsx" | "xlsm" | "xlsb" | "xlt" | "xltx" | "xltm" | "ods" | "ots"
+        | "fods" | "numbers" | "tsv" => "file-spreadsheet",
+        "ppt" | "pptx" | "odp" => "document",
         "bin" | "dat" | "exe" | "dll" | "so" | "dylib" | "class" | "o" | "obj" | "wasm" | "db"
         | "sqlite" | "sqlite3" | "iso" => "binary",
         _ => "file",
@@ -2358,6 +2381,7 @@ pub(crate) fn icon_aspect_ratio(name: &str) -> f32 {
         "document" | "image" | "audio" | "video" | "code" | "file"
         | "archive" | "archive-locked" => 0.75,
         "documents" => 0.875,
+        "file-spreadsheet" => 238.0 / 320.0,
         "csv" => 547.8 / 548.0,
         "chevron-left" => 0.625,
         "home" => 1.125,

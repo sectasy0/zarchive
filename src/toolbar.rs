@@ -733,6 +733,65 @@ fn toolbar_icon_button(
         )
 }
 
+/// Builds native Windows caption controls without making the whole toolbar a drag area.
+pub(crate) fn windows_titlebar_controls(window: &Window, theme: Theme) -> impl IntoElement {
+    let supported = window.window_controls();
+    div()
+        .id("window-controls")
+        .flex()
+        .items_center()
+        .flex_shrink_0()
+        .h_full()
+        .when(supported.minimize, |this| {
+            this.child(windows_titlebar_control(
+                "minimize",
+                gpui::component::IconName::WindowMinimize,
+                gpui::WindowControlArea::Min,
+                theme,
+            ))
+        })
+        .when(supported.maximize, |this| {
+            this.child(windows_titlebar_control(
+                "maximize",
+                if window.is_maximized() {
+                    gpui::component::IconName::WindowRestore
+                } else {
+                    gpui::component::IconName::WindowMaximize
+                },
+                gpui::WindowControlArea::Max,
+                theme,
+            ))
+        })
+        .child(windows_titlebar_control(
+            "close",
+            gpui::component::IconName::WindowClose,
+            gpui::WindowControlArea::Close,
+            theme,
+        ))
+}
+
+fn windows_titlebar_control(
+    id: &'static str,
+    icon: gpui::component::IconName,
+    area: gpui::WindowControlArea,
+    theme: Theme,
+) -> impl IntoElement {
+    div()
+        .id(gpui::SharedString::from(format!("window-control:{id}")))
+        .debug_selector(move || format!("window-control:{id}"))
+        .flex()
+        .w(px(46.0))
+        .h_full()
+        .flex_shrink_0()
+        .justify_center()
+        .items_center()
+        .text_color(rgb(theme.text))
+        .window_control_area(area)
+        .hover(|style| style.bg(rgb(theme.hover)))
+        .active(|style| style.bg(rgb(theme.selection)))
+        .child(gpui::component::Icon::new(icon).small())
+}
+
 /// Renders the retained search input with the current query and theme.
 fn search_input(manager: &ArchiveManager, theme: Theme, cx: &mut Context<ArchiveManager>) -> impl IntoElement {
     let input = manager
@@ -1080,13 +1139,24 @@ pub(crate) fn toolbox_bar(
         .flex()
         .items_center()
         .justify_between()
-        .w_full()
+        .flex_1()
+        .min_w(px(0.0))
         .h(px(44.0))
         .bg(rgb(theme.titlebar))
         .border_b_1()
         .border_color(rgb(theme.subtle_border))
         .px_2()
         .child(left)
+        .when(cfg!(target_os = "windows"), |this| {
+            this.child(
+                div()
+                    .id("titlebar-drag-region")
+                    .flex_1()
+                    .h_full()
+                    .min_w(px(24.0))
+                    .window_control_area(gpui::WindowControlArea::Drag),
+            )
+        })
         .child(search_input(manager, theme, cx))
         .child(right)
 }

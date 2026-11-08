@@ -2446,6 +2446,15 @@ mod tests {
         assert_eq!(file_icon("pdf"), "pdf");
         assert_eq!(file_icon("PNG"), "image");
         assert_eq!(file_icon("csv"), "csv");
+        for extension in [
+            "xls", "xlsx", "xlsm", "xlsb", "xlt", "xltx", "xltm", "ods", "ots", "fods",
+            "numbers", "tsv",
+        ] {
+            assert_eq!(file_icon(extension), "file-spreadsheet", "{extension}");
+        }
+        for extension in ["ppt", "pptx", "odp"] {
+            assert_eq!(file_icon(extension), "document", "{extension}");
+        }
         assert_eq!(file_icon("zip"), "archive");
         for extension in ["bz2", "tbz", "tbz2", "xz", "txz", "zst", "lz4", "lz", "br"] {
             assert_eq!(file_icon(extension), "archive");

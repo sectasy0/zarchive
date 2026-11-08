@@ -818,6 +818,7 @@ mod tests {
                         format,
                         compression: format.compression_levels()[0],
                         dictionary_mib: 1,
+                        encrypt_headers: format == ResolvedFormat::SevenZip,
                         ..CreateOptions::default()
                     },
                     password,
@@ -878,7 +879,8 @@ mod tests {
                     assert!(archive::list_archive(selected).is_err());
                     assert!(
                         archive::extract_entry_with_password(selected, entry_name, Some("wrong"))
-                            .is_err()
+                            .is_err(),
+                        "{format:?} accepted an incorrect password"
                     );
                 }
                 for part in parts {
