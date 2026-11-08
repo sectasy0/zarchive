@@ -567,7 +567,7 @@ impl Render for ArchiveManager {
                                             ))
                                             .child(location_shortcut(
                                                 "place-network",
-                                                "network",
+                                                "icons/network.svg",
                                                 language.text("Network"),
                                                 language,
                                                 network_location(),
@@ -809,8 +809,7 @@ impl Render for ArchiveManager {
                                                 language.text("Hide notifications"),
                                             )
                                             .on_click(cx.listener(|this, _, _, cx| {
-                                                this.notifications_visible = false;
-                                                cx.notify();
+                                                this.set_notifications_visible(false, cx);
                                             })),
                                     ),
                             )
@@ -1615,11 +1614,7 @@ fn location_shortcut(
     let subtitle = path
         .as_ref()
         .map(|path| path.display().to_string());
-    let icon = if icon == "network" {
-        gpui::component::Icon::from(gpui::assets::IconName::Network)
-    } else {
-        gpui::component::Icon::default().path(icon)
-    };
+    let icon = gpui::component::Icon::default().path(icon);
     let button = Button::new(id)
         .custom(ui::sidebar_button_style(theme, selected, cx))
         .small()

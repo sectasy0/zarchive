@@ -40,6 +40,7 @@ impl AssetSource for IconAssets {
             "icons/downloads.svg" => include_bytes!("../assets/icons/downloads.svg"),
             "icons/keyboard.svg" => include_bytes!("../assets/icons/keyboard.svg"),
             "icons/swatchbook.svg" => include_bytes!("../assets/icons/swatchbook.svg"),
+            "icons/network.svg" => include_bytes!("../assets/icons/network.svg"),
             _ => return gpui::AssetSource::load(&gpui::assets::AllAssets, path).or(Ok(None)),
         };
         Ok(Some(Cow::Borrowed(svg)))
@@ -80,6 +81,7 @@ impl AssetSource for IconAssets {
             "keyboard.svg",
             "folder-open.svg",
             "downloads.svg",
+            "network.svg",
         ]
         .into_iter()
         .map(SharedString::from)
@@ -122,7 +124,8 @@ mod tests {
             "icons/folder-open.svg",
             "icons/downloads.svg",
             "icons/keyboard.svg",
-            "icons/swatchbook.svg"
+            "icons/swatchbook.svg",
+            "icons/network.svg"
         ];
 
         for path in paths {

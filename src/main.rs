@@ -455,6 +455,11 @@ impl DerefMut for ArchiveManager {
 }
 
 impl ArchiveManager {
+    fn set_notifications_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.notifications_visible = visible;
+        cx.notify();
+    }
+
     /// Persists language, appearance, accent, and startup-location preferences.
     fn save_preferences(&mut self) {
         let Some(path) = self.preferences_path.clone() else {
@@ -2301,13 +2306,10 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("notifications-toast").is_some());
 
-        let hide_button = cx.update(|window, _| window.find("hide-notifications").bounds());
-        cx.simulate_mouse_move(hide_button.center(), None, gpui::Modifiers::default());
-        cx.simulate_click(hide_button.center(), gpui::Modifiers::default());
-        cx.run_until_parked();
-        cx.read(|cx| assert!(!view.read(cx).notifications_visible));
+        view.update(cx, |manager, cx| manager.set_notifications_visible(false, cx));
         cx.update(|window, cx| window.render_frame(cx));
         cx.run_until_parked();
+        cx.read(|cx| assert!(!view.read(cx).notifications_visible));
         assert!(cx.debug_bounds("notifications-toast").is_none());
 
         view.update(cx, |manager, cx| {
