@@ -1,7 +1,6 @@
 //! Provides localized labels and pluralized item counts for supported languages.
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-/// Selects one of the interface languages supported by the application.
 pub enum Language {
     /// English interface strings.
     #[default]
@@ -93,6 +92,7 @@ impl Language {
             [
                 "Failed to add to archive",
                 "Failed to move item",
+                "Failed to extract",
                 "Failed to remove entry from archive",
             ]
             .into_iter()
@@ -2955,6 +2955,33 @@ const TRANSLATIONS: &[(&str, &str, &str, &str, &str, &str)] = &[
         "Versuchen Sie einen anderen Suchbegriff oder löschen Sie die Suche.",
     ),
     ("PLACES", "MIEJSCA", "位置", "LUGARES", "場所", "ORTE"),
+    ("FAVORITES", "ULUBIONE", "收藏夹", "FAVORITOS", "お気に入り", "FAVORITEN"),
+    ("Favorites", "Ulubione", "收藏夹", "Favoritos", "お気に入り", "Favoriten"),
+    ("Network", "Sieć", "网络", "Red", "ネットワーク", "Netzwerk"),
+    (
+        "No favorites yet",
+        "Brak ulubionych",
+        "暂无收藏夹",
+        "Aún no hay favoritos",
+        "お気に入りはありません",
+        "Noch keine Favoriten",
+    ),
+    (
+        "Add to Favorites",
+        "Dodaj do ulubionych",
+        "添加到收藏夹",
+        "Añadir a favoritos",
+        "お気に入りに追加",
+        "Zu Favoriten hinzufügen",
+    ),
+    (
+        "Remove from Favorites",
+        "Usuń z ulubionych",
+        "从收藏夹移除",
+        "Quitar de favoritos",
+        "お気に入りから削除",
+        "Aus Favoriten entfernen",
+    ),
     ("Places", "Miejsca", "位置", "Lugares", "場所", "Orte"),
     (
         "Documents",
@@ -2963,6 +2990,38 @@ const TRANSLATIONS: &[(&str, &str, &str, &str, &str, &str)] = &[
         "Documentos",
         "ドキュメント",
         "Dokumente",
+    ),
+    (
+        "Desktop",
+        "Pulpit",
+        "桌面",
+        "Escritorio",
+        "デスクトップ",
+        "Desktop",
+    ),
+    (
+        "Downloads",
+        "Pobrane",
+        "下载",
+        "Descargas",
+        "ダウンロード",
+        "Downloads",
+    ),
+    (
+        "RECENT FOLDERS",
+        "OSTATNIE FOLDERY",
+        "最近打开的文件夹",
+        "CARPETAS RECIENTES",
+        "最近使用したフォルダー",
+        "ZULETZT VERWENDETE ORDNER",
+    ),
+    (
+        "No recent folders",
+        "Brak ostatnio otwieranych folderów",
+        "没有最近打开的文件夹",
+        "No hay carpetas recientes",
+        "最近使用したフォルダーはありません",
+        "Keine zuletzt verwendeten Ordner",
     ),
     (
         "Home",
@@ -3215,7 +3274,7 @@ mod tests {
             ),
             (
                 "Failed to extract: Unsupported compression method",
-                "This archive format or compression method is not supported.",
+                "Unsupported compression method",
             ),
             (
                 "Failed to extract: unrecognized library failure",

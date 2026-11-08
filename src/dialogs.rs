@@ -90,6 +90,7 @@ fn settings_category_button(
     icon: &'static str,
     selected: bool,
     theme: Theme,
+    cx: &App,
 ) -> Button {
     let color = if selected {
         theme.soft_accent()
@@ -97,21 +98,28 @@ fn settings_category_button(
         theme.muted_text
     };
     Button::new(id)
-        .ghost()
+        .custom(ui::sidebar_button_style(theme, selected, cx))
         .small()
         .selected(selected)
         .w_full()
-        .h(px(32.0))
+        .h(px(34.0))
+        .rounded_sm()
         .text_color(rgb(color))
-        .when(selected, |this| this.bg(rgb(theme.selection)))
         .child(
             div()
                 .flex()
-                .flex_1()
                 .items_center()
                 .gap_2()
-                .child(app_icon(icon, 14.0, color))
-                .child(label),
+                .w_full()
+                .child(
+                    div()
+                        .w(px(2.0))
+                        .h(px(20.0))
+                        .rounded_sm()
+                        .bg(rgb(if selected { theme.accent } else { theme.sidebar })),
+                )
+                .child(app_icon(icon, 13.0, color))
+                .child(div().flex_1().min_w(px(0.0)).text_left().child(label)),
         )
 }
 
@@ -333,6 +341,7 @@ fn settings_view(
         "folder",
         category == SettingsCategory::General,
         theme,
+        cx,
     )
     .on_click(cx.listener(|this, _, _, cx| {
         this.settings_category = SettingsCategory::General;
@@ -341,9 +350,10 @@ fn settings_view(
     let appearance_button = settings_category_button(
         "settings-category-appearance",
         language.text("Appearance"),
-        "toolbox",
+        "swatchbook",
         category == SettingsCategory::Appearance,
         theme,
+        cx,
     )
     .on_click(cx.listener(|this, _, _, cx| {
         this.settings_category = SettingsCategory::Appearance;
@@ -355,6 +365,7 @@ fn settings_view(
         "toolbox",
         category == SettingsCategory::Advanced,
         theme,
+        cx,
     )
     .on_click(cx.listener(|this, _, _, cx| {
         this.settings_category = SettingsCategory::Advanced;
@@ -608,8 +619,8 @@ fn settings_view(
                 .child(advanced_button)
                 .child(
                     settings_category_button(
-                        "settings-category-keyboard", language.text("Keyboard"), "code",
-                        category == SettingsCategory::Keyboard, theme,
+                        "settings-category-keyboard", language.text("Keyboard"), "keyboard",
+                        category == SettingsCategory::Keyboard, theme, cx,
                     ).on_click(cx.listener(|this, _, _, cx| {
                         this.settings_category = SettingsCategory::Keyboard;
                         cx.notify();
@@ -793,7 +804,7 @@ pub(crate) fn modal_view(
         }
         _ => div().h(px(0.0)).into_any_element(),
     };
-    ui::center_dialog(dialog, title, footer, manager, window, cx)
+    ui::center_dialog(dialog, title, footer)
         .width(px(match modal {
             Modal::Settings => 620.0,
             Modal::CompareArchives => 900.0,

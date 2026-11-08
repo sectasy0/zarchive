@@ -21,8 +21,12 @@ available while your files are processed.
 
 - **Browse before extracting.** The workspace opens with two side-by-side
   browsers. Each has independent tabs for folders and archives, Back and Forward
-  history, sorting, search, filters, and selection. Navigate the folder tree,
-  sort by name, type, or size, and open individual files in their default desktop
+  history, sorting, search, filters, and selection. Use the Home, Desktop,
+  Documents, Downloads, and Network locations. Open the virtual Favorites
+  location in the browser to view pinned directories; add or remove folders from
+  their context menu. Back returns to Favorites after opening a pinned folder.
+  Reopen one of the eight most recently visited folders from Places.
+  Sort by name, type, or size, and open individual files in their default desktop
   applications. Up/Down selects rows; Right enters a folder and Left moves to
   its parent. Selection follows visible search results, filters, and sorting
   without opening a preview.
@@ -136,6 +140,8 @@ available while your files are processed.
   Drag files or folders from the file list or desktop onto an existing archive,
   or into an open archive's current folder, to add them in the background. Valid
   targets use the accent color; invalid or unavailable targets turn red.
+  Drag a single file entry from an open archive onto a folder in the other
+  browser to extract a copy there without changing the source archive.
   Drop a file, archive, or folder onto a filesystem folder to move it instead.
   Folder targets are available in the file list, the sidebar tree, and the
   Home/Documents shortcuts. Moves run in the background without overwriting

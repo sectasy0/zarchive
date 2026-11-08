@@ -267,6 +267,8 @@ impl ArchiveManager {
                 self.selected_entry = None;
                 self.status_message = None;
                 cx.notify();
+            } else if self.show_favorites {
+                self.navigate_to_favorite(target.path.clone(), cx);
             } else {
                 self.navigate_to(target.path.clone(), cx);
             }
@@ -585,6 +587,7 @@ pub fn menu(
     view: WeakEntity<ArchiveManager>,
     language: Language,
     busy: bool,
+    is_favorite: bool,
     cx: &App,
 ) -> PopupMenu {
     menu = menu.min_w(px(260.0)).max_w(px(360.0));
@@ -669,7 +672,44 @@ pub fn menu(
             );
         }
     }
+    if target.is_directory && target.archive_entry.is_none() {
+        menu = menu.separator();
+        menu = favorite_location_menu(
+            menu,
+            target.path.clone(),
+            view,
+            language,
+            is_favorite,
+            !busy,
+        );
+    }
     menu
+}
+
+pub(crate) fn favorite_location_menu(
+    menu: PopupMenu,
+    path: PathBuf,
+    view: WeakEntity<ArchiveManager>,
+    language: Language,
+    is_favorite: bool,
+    enabled: bool,
+) -> PopupMenu {
+    let label = language.text(if is_favorite {
+        "Remove from Favorites"
+    } else {
+        "Add to Favorites"
+    });
+    menu.item(
+        PopupMenuItem::new(label)
+            .icon(IconName::Star)
+            .disabled(!enabled)
+            .on_click(move |_, _, cx| {
+                let _ = view.update(cx, |manager, cx| {
+                    manager.toggle_favorite_folder(path.clone());
+                    cx.notify();
+                });
+            }),
+    )
 }
 
 pub(crate) fn inspected_entry_menu(
@@ -945,6 +985,42 @@ mod tests {
             assert!(menu.try_find_by_label("Move to...").is_none());
             assert!(menu.try_find_by_label("Create archive").is_none());
         });
+    }
+
+    #[gpui::test]
+    fn filesystem_folder_context_menu_adds_and_removes_favorite(cx: &mut gpui::TestAppContext) {
+        use gpui::test::TestWindowExt;
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        let settings_path = directory.path().join("settings.json");
+        let (view, cx) = crate::tests::component_window(cx, |_, cx| {
+            let mut manager = crate::tests::test_manager(cx);
+            manager.current_directory = Some(directory.path().to_path_buf());
+            manager.entries = vec![archive::ArchiveEntry {
+                name: "folder".into(),
+                source_path: None,
+                size: 0,
+                is_directory: true,
+                modified: None,
+                is_encrypted: false,
+            }];
+            manager.preferences_path = Some(settings_path.clone());
+            manager
+        });
+
+        cx.update(|window, cx| window.right_click("folder", cx));
+        choose_menu_item(cx, "Add to Favorites");
+        cx.read(|cx| assert_eq!(view.read(cx).favorite_folders, [folder.clone()]));
+        assert_eq!(
+            crate::UserPreferences::load(&settings_path).favorite_folders,
+            [folder.clone()]
+        );
+
+        cx.update(|window, cx| window.right_click("folder", cx));
+        choose_menu_item(cx, "Remove from Favorites");
+        cx.read(|cx| assert!(view.read(cx).favorite_folders.is_empty()));
+        assert!(crate::UserPreferences::load(&settings_path).favorite_folders.is_empty());
     }
 
     #[gpui::test]

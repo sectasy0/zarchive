@@ -19,25 +19,18 @@ impl Render for ArchiveManager {
         } else if self.modal.is_none() && self.password_prompt.input.focus.is_focused(window) {
             window.focus(&self.content_focus, cx);
         }
-        if self.error.is_none() {
+        if self.error.is_none() && !self.show_favorites {
             self.calculate_directory_sizes(window, cx);
         }
         task_queue::prepare(self, window, cx);
         let dark = self.theme_mode.is_dark(window.appearance());
         let theme = Theme::new(dark).with_accent(self.accent_color.color(dark));
         let language = self.language;
-        let location_title = self
-            .archive_name
-            .as_deref()
-            .or_else(|| {
-                self.current_directory
-                    .as_deref()
-                    .and_then(Path::file_name)
-                    .and_then(|name| name.to_str())
-            })
-            .unwrap_or(language.text("File Browser"))
-            .to_owned();
-        let folders = folder_tree(&self.entries);
+        let sidebar_current_directory = if self.show_favorites {
+            None
+        } else {
+            self.current_directory.clone()
+        };
         let item_count = self.visible_browser_entries().len();
         let location_size = self
             .location_size(&self.visible_browser_entries())
@@ -52,7 +45,7 @@ impl Render for ArchiveManager {
                 }
             });
         let status_message = if self.comparison_dialog.is_busy() {
-            Some(language.text("Comparing archives...").to_owned())
+                Some(language.text("Comparing archives...").to_owned())
         } else if self.inspector.is_busy() {
             Some(language.text("Inspecting archive...").to_owned())
         } else if self.file_actions.delete_task.is_some() {
@@ -121,69 +114,48 @@ impl Render for ArchiveManager {
         } else {
             0x854d0e
         };
-        let mut folder_tree_view = div()
-            .id("folder-tree")
+        let favorites_place = favorites_place_button(
+            language,
+            self.favorite_folders.len(),
+            self.show_favorites,
+            theme,
+            cx,
+        );
+
+        let mut recent_folders_view = div()
+            .id("recent-folders")
+            .debug_selector(|| "recent-folders".to_owned())
             .flex()
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
             .overflow_y_scroll()
-            .track_scroll(&self.folder_scroll)
+            .track_scroll(&self.sidebar_scroll)
             .px(px(6.0))
             .pb_2()
-            .gap_0();
-
-        if self.archive_name.is_some() && self.error.is_none() {
-            folder_tree_view = folder_tree_view.child(folder_row(
-                &location_title,
-                "",
-                0,
-                &self.selected_folder,
-                self.selected_entry.as_deref(),
-                None,
-                theme,
-                self.archive_drop_enabled(),
-                cx,
-            ));
-            for (path, name, depth) in folders {
-                folder_tree_view = folder_tree_view.child(folder_row(
-                    &name,
-                    &path,
-                    depth + 1,
-                    &self.selected_folder,
-                    self.selected_entry.as_deref(),
-                    None,
+            .gap_1();
+        if self.recent_folders.is_empty() {
+            recent_folders_view = recent_folders_view.child(
+                div()
+                    .mx_2()
+                    .py_2()
+                    .text_xs()
+                    .text_color(rgb(theme.faint_text))
+                    .child(language.text("No recent folders")),
+            );
+        } else {
+            for (index, path) in self.recent_folders.iter().enumerate() {
+                recent_folders_view = recent_folders_view.child(recent_folder_row(
+                    path,
+                    index,
+                    "recent",
+                    self.favorite_folders.contains(path),
+                    language,
+                    self.current_directory.as_deref(),
                     theme,
                     self.archive_drop_enabled(),
                     cx,
                 ));
-            }
-        } else if let Some(directory) = &self.current_directory {
-            folder_tree_view = folder_tree_view.child(folder_row(
-                &location_title,
-                "",
-                0,
-                "",
-                self.selected_entry.as_deref(),
-                Some(directory.clone()),
-                theme,
-                self.archive_drop_enabled(),
-                cx,
-            ));
-            for entry in &self.entries {
-                if entry.is_directory {
-                    folder_tree_view = folder_tree_view.child(folder_row(
-                        &entry.name,
-                        &entry.name,
-                        1,
-                        "",
-                        self.selected_entry.as_deref(),
-                        Some(directory.clone()),
-                        theme,
-                        self.archive_drop_enabled(),
-                        cx,
-                    ));
-                }
             }
         }
 
@@ -193,15 +165,19 @@ impl Render for ArchiveManager {
         let file_list_id = if pane_index == 0 { "file-list" } else { "file-list-secondary" };
         let item_list_id = if pane_index == 0 { "file-list-items" } else { "file-list-items-secondary" };
         let background_menu_view = cx.entity().downgrade();
-        let can_create_here = self.current_directory.is_some() && self.creation_task.is_none();
+        let can_create_here = self.current_directory.is_some()
+            && !self.show_favorites
+            && self.creation_task.is_none();
         let search_query = self.toolbar_search.text_query();
         let visible_entries = self.visible_browser_entries();
         let item_count = visible_entries.len();
         let column_order = self.column_order;
         let visible_columns = self.visible_columns;
         let column_widths = self.column_widths;
-        let archive_path = self.archive_path.clone();
-        let current_directory = self.current_directory.clone();
+        let archive_path = (!self.show_favorites).then(|| self.archive_path.clone()).flatten();
+        let current_directory = (!self.show_favorites)
+            .then(|| self.current_directory.clone())
+            .flatten();
         let archive_password = self.archive_password.clone();
         let selected_folder = self.selected_folder.clone();
         let selected_entry = self.selected_entry.clone();
@@ -325,15 +301,18 @@ impl Render for ArchiveManager {
                                 let column_order = manager.column_order;
                                 let visible_columns = manager.visible_columns;
                                 let column_widths = manager.column_widths;
+                                let favorite_folders = manager.favorite_folders.clone();
+                                let show_favorites_view = manager.show_favorites;
                                 let drop_marker_row = manager.active_browser_tab().drop_marker_row;
                                 let rows = range
                                     .filter_map(|index| {
                                         let entry = visible_entries.get(index)?;
-                                        let folder_size_known = current_directory.is_none()
+                                        let folder_size_known = !show_favorites_view
+                                            && (current_directory.is_none()
                                             || !entry.is_directory
                                             || manager.directory_sizes.as_ref().is_some_and(
                                                 |sizes| sizes.contains_key(&entry.name),
-                                            );
+                                            ));
                                         Some(
                                             file_row(
                                                 entry,
@@ -349,6 +328,8 @@ impl Render for ArchiveManager {
                                                 column_order,
                                                 visible_columns,
                                                 column_widths,
+                                                favorite_folders.clone(),
+                                                show_favorites_view,
                                                 drop_marker_row == Some(index),
                                                 theme,
                                                 manager.archive_drop_enabled(),
@@ -517,7 +498,7 @@ impl Render for ArchiveManager {
                             .id("sidebar")
                             .flex()
                             .flex_col()
-                            .w(px(232.0))
+                            .w(px(248.0))
                             .flex_shrink_0()
                             .min_h(px(0.0))
                             .border_r_1()
@@ -529,7 +510,7 @@ impl Render for ArchiveManager {
                                     .flex_col()
                                     .flex_shrink_0()
                                     .pt_1()
-                                    .child(sidebar_heading(language.text("Places"), None, theme))
+                                    .child(sidebar_heading(language.text("PLACES"), None, theme))
                                     .child(
                                         div()
                                             .flex()
@@ -537,21 +518,66 @@ impl Render for ArchiveManager {
                                             .px(px(6.0))
                                             .pb_2()
                                             .child(location_shortcut(
-                                                language.text("Documents"),
-                                                dirs::document_dir(),
-                                                self.current_directory.as_deref(),
+                                                "place-home",
+                                                "icons/home.svg",
+                                                language.text("Home"),
+                                                language,
+                                                dirs::home_dir(),
+                                                sidebar_current_directory.clone(),
+                                                &self.favorite_folders,
                                                 theme,
                                                 self.archive_drop_enabled(),
                                                 cx,
                                             ))
                                             .child(location_shortcut(
-                                                language.text("Home"),
-                                                dirs::home_dir(),
-                                                self.current_directory.as_deref(),
+                                                "place-desktop",
+                                                "icons/folder-open.svg",
+                                                language.text("Desktop"),
+                                                language,
+                                                dirs::desktop_dir(),
+                                                sidebar_current_directory.clone(),
+                                                &self.favorite_folders,
                                                 theme,
                                                 self.archive_drop_enabled(),
                                                 cx,
-                                            )),
+                                            ))
+                                            .child(location_shortcut(
+                                                "place-documents",
+                                                "icons/documents.svg",
+                                                language.text("Documents"),
+                                                language,
+                                                dirs::document_dir(),
+                                                sidebar_current_directory.clone(),
+                                                &self.favorite_folders,
+                                                theme,
+                                                self.archive_drop_enabled(),
+                                                cx,
+                                            ))
+                                            .child(location_shortcut(
+                                                "place-downloads",
+                                                "icons/downloads.svg",
+                                                language.text("Downloads"),
+                                                language,
+                                                dirs::download_dir(),
+                                                sidebar_current_directory.clone(),
+                                                &self.favorite_folders,
+                                                theme,
+                                                self.archive_drop_enabled(),
+                                                cx,
+                                            ))
+                                            .child(location_shortcut(
+                                                "place-network",
+                                                "network",
+                                                language.text("Network"),
+                                                language,
+                                                network_location(),
+                                                sidebar_current_directory.clone(),
+                                                &self.favorite_folders,
+                                                theme,
+                                                self.archive_drop_enabled(),
+                                                cx,
+                                            ))
+                                            .child(favorites_place),
                                     ),
                             )
                             .child(
@@ -560,26 +586,26 @@ impl Render for ArchiveManager {
                                     .border_t_1()
                                     .border_color(rgb(theme.subtle_border))
                                     .child(sidebar_heading(
-                                        language.text("Folders"),
-                                        Some(folders_count(&self.entries)),
+                                        language.text("RECENT FOLDERS"),
+                                        Some(self.recent_folders.len()),
                                         theme,
                                     )),
                             )
                             .child(
                                 div()
-                                    .id("folder-tree-scroll-viewport")
+                                    .id("recent-folders-scroll-viewport")
                                     .relative()
                                     .flex()
                                     .flex_col()
                                     .flex_1()
                                     .min_h(px(0.0))
                                     .overflow_hidden()
-                                    .child(folder_tree_view)
+                                    .child(recent_folders_view)
                                     .child(
                                         gpui::component::scroll::Scrollbar::vertical(
-                                            &self.folder_scroll,
+                                            &self.sidebar_scroll,
                                         )
-                                        .id("folder-tree-scrollbar")
+                                        .id("recent-folders-scrollbar")
                                         .mode(gpui::component::scroll::ScrollbarMode::Always),
                                     ),
                             ),
@@ -982,17 +1008,27 @@ fn browser_panel(
         .tabs
         .iter()
         .map(|tab| {
-            let label = tab.archive_name
-                .clone()
-                .or_else(|| {
-                    tab.current_directory
-                        .as_deref()
-                        .and_then(Path::file_name)
-                        .map(|name| name.to_string_lossy().into_owned())
-                })
-                .or_else(|| tab.current_directory.as_deref().map(|path| path.display().to_string()))
-                .unwrap_or_else(|| language.text("File Browser").to_owned());
-            let icon = if tab.archive_path.is_some() { "archive" } else { "folder" };
+            let label = if tab.show_favorites {
+                language.text("Favorites").to_owned()
+            } else {
+                tab.archive_name
+                    .clone()
+                    .or_else(|| {
+                        tab.current_directory
+                            .as_deref()
+                            .and_then(Path::file_name)
+                            .map(|name| name.to_string_lossy().into_owned())
+                    })
+                    .or_else(|| tab.current_directory.as_deref().map(|path| path.display().to_string()))
+                    .unwrap_or_else(|| language.text("File Browser").to_owned())
+            };
+            let icon = if tab.show_favorites {
+                "star"
+            } else if tab.archive_path.is_some() {
+                "archive"
+            } else {
+                "folder"
+            };
             (label, icon)
         })
         .collect();
@@ -1393,11 +1429,11 @@ fn sidebar_heading(label: &'static str, count: Option<usize>, theme: Theme) -> i
         .flex()
         .items_center()
         .justify_between()
-        .h(px(30.0))
+        .h(px(32.0))
         .px_3()
         .text_size(px(10.0))
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(rgb(theme.muted_text))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(rgb(theme.faint_text))
         .child(label)
         .when_some(count, |this, count| {
             this.child(
@@ -1408,125 +1444,251 @@ fn sidebar_heading(label: &'static str, count: Option<usize>, theme: Theme) -> i
         })
 }
 
-/// Renders one archive or filesystem folder row with selection and navigation behavior.
-fn folder_row(
-    label: &str,
-    path: &str,
-    depth: usize,
-    selected_folder: &str,
-    selected_entry: Option<&str>,
-    current_directory: Option<PathBuf>,
+fn sidebar_button_content(
+    icon: gpui::component::Icon,
+    label: String,
+    subtitle: Option<String>,
+    selected: bool,
+    available: bool,
     theme: Theme,
-    drop_enabled: bool,
-    cx: &mut Context<ArchiveManager>,
 ) -> impl IntoElement {
-    let selected = path == selected_folder || selected_entry == Some(path);
-    let path = path.to_owned();
-    let drop_directory = current_directory
-        .as_ref()
-        .map(|directory| directory.join(&path));
-    let item = gpui::component::sidebar::SidebarMenuItem::new(label.to_owned())
-        .icon(
-            gpui::component::Icon::default()
-                .path("icons/folder.svg")
-                .text_color(rgb(theme.accent)),
-        )
-        .active(selected)
-        .h(px(28.0))
-        .pl(px(8.0 + depth as f32 * 14.0))
-        .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-            if let Some(directory) = &current_directory {
-                if !path.is_empty() {
-                    if event.click_count() == 2 {
-                        this.navigate_to(directory.join(&path), cx);
-                    } else {
-                        this.selected_entry = Some(path.clone());
-                        cx.notify();
-                    }
-                }
-            } else if event.click_count() == 2 {
-                this.selected_folder = path.clone();
-                this.selected_entry = None;
-                this.status_message = None;
-                cx.notify();
-            } else {
-                this.selected_entry = Some(path.clone());
-                cx.notify();
-            }
-        }));
-    let item = ui::NavigationItem {
-        id: format!("folder:{label}:{depth}").into(),
-        item,
-    };
     div()
-        .id(gpui::SharedString::from(format!(
-            "folder-drop:{label}:{depth}"
-        )))
+        .flex()
+        .items_center()
+        .gap_2()
         .w_full()
-        .min_w(px(0.0))
-        .child(item)
-        .when_some(drop_directory, |area, directory| {
-            drop_service::folder_drop_area(area, directory, theme, drop_enabled, cx)
-        })
+        .child(
+            div()
+                .w(px(2.0))
+                .h(px(28.0))
+                .rounded_sm()
+                .bg(rgb(if selected {
+                    theme.accent
+                } else {
+                    theme.sidebar
+                })),
+        )
+        .child(icon.text_color(rgb(if !available {
+            theme.faint_text
+        } else if selected {
+            theme.accent
+        } else {
+            theme.muted_text
+        })))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.0))
+                .items_start()
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(rgb(theme.text))
+                        .child(label),
+                )
+                .when_some(subtitle, |row, subtitle| {
+                    row.child(
+                        div()
+                            .truncate()
+                            .text_size(px(10.0))
+                            .text_color(rgb(theme.faint_text))
+                            .child(subtitle),
+                    )
+                }),
+        )
 }
 
-/// Renders a Documents/Home shortcut and disables it when its path is unavailable.
-fn location_shortcut(
-    label: &'static str,
-    path: Option<PathBuf>,
+fn favorites_place_button(
+    language: Language,
+    count: usize,
+    active: bool,
+    theme: Theme,
+    cx: &mut Context<ArchiveManager>,
+) -> Button {
+    let button = Button::new("place-favorites-toggle")
+        .custom(ui::sidebar_button_style(theme, active, cx))
+        .small()
+        .w_full()
+        .h(px(46.0))
+        .rounded_sm()
+        .accessibility_label(language.text("Favorites"))
+        .on_click(cx.listener(|manager, _, _, cx| {
+            manager.enter_favorites_view(cx);
+        }))
+        .child(sidebar_button_content(
+            gpui::component::Icon::from(gpui::assets::IconName::Star),
+            language.text("Favorites").to_owned(),
+            Some(language.item_count(count)),
+            active,
+            true,
+            theme,
+        ));
+    button
+}
+
+fn recent_folder_row(
+    path: &Path,
+    index: usize,
+    id_prefix: &'static str,
+    is_favorite: bool,
+    language: Language,
     current_directory: Option<&Path>,
     theme: Theme,
     drop_enabled: bool,
     cx: &mut Context<ArchiveManager>,
 ) -> impl IntoElement {
-    let is_available = path.is_some();
-    let is_home = path == dirs::home_dir();
-    let selected = is_available && path.as_deref() == current_directory;
-    let drop_directory = path.clone();
-    let item = gpui::component::sidebar::SidebarMenuItem::new(label)
-        .icon(
-            gpui::component::Icon::default()
-                .path(if is_home {
-                    "icons/home.svg"
-                } else {
-                    "icons/documents.svg"
-                })
-                .text_color(rgb(if is_available {
-                    theme.accent
-                } else {
-                    theme.faint_text
-                })),
+    let name = path
+        .file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned();
+    let parent = path
+        .parent()
+        .map_or_else(|| path.display().to_string(), |parent| parent.display().to_string());
+    let target = path.to_path_buf();
+    let click_target = target.clone();
+    let selected = current_directory == Some(path);
+    let selector = format!("{id_prefix}-folder-{index}");
+    let item = Button::new(format!("{id_prefix}-folder-button-{index}"))
+        .custom(ui::sidebar_button_style(theme, selected, cx))
+        .small()
+        .w_full()
+        .h(px(46.0))
+        .rounded_sm()
+        .accessibility_label(format!("{name}, {parent}"))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.navigate_to(click_target.clone(), cx);
+        }))
+        .child(sidebar_button_content(
+            gpui::component::Icon::default().path("icons/folder.svg"),
+            name,
+            Some(parent),
+            selected,
+            true,
+            theme,
+        ));
+    let row = div()
+        .id(gpui::SharedString::from(format!("{selector}-target")))
+        .debug_selector(move || selector.clone())
+        .w_full()
+        .child(item);
+    let row = row.when(drop_enabled, |row| {
+        drop_service::folder_drop_area(row, target, theme, drop_enabled, cx)
+    });
+    let menu_path = path.to_path_buf();
+    let menu_view = cx.entity().downgrade();
+    row.context_menu(move |menu, _, _| {
+        file_actions::favorite_location_menu(
+            menu,
+            menu_path.clone(),
+            menu_view.clone(),
+            language,
+            is_favorite,
+            true,
         )
-        .active(selected)
-        .h(px(28.0))
-        .when(is_available, |this| {
-            this.on_click(cx.listener(move |this, _, _, cx| {
-                if let Some(path) = &path {
-                    this.navigate_to(path.clone(), cx);
-                }
-            }))
-        });
-    let item = ui::NavigationItem {
-        id: (if is_home {
-            "place-home"
-        } else {
-            "place-documents"
-        })
-        .into(),
-        item,
+    })
+}
+
+/// Renders a Documents/Home shortcut and disables it when its path is unavailable.
+fn location_shortcut(
+    id: &'static str,
+    icon: &'static str,
+    label: &'static str,
+    language: Language,
+    path: Option<PathBuf>,
+    current_directory: Option<PathBuf>,
+    favorite_folders: &[PathBuf],
+    theme: Theme,
+    drop_enabled: bool,
+    cx: &mut Context<ArchiveManager>,
+) -> impl IntoElement {
+    let is_available = path.is_some();
+    let selected = is_available && path == current_directory;
+    let is_favorite = path
+        .as_ref()
+        .is_some_and(|path| favorite_folders.contains(path));
+    let drop_directory = path.clone();
+    let click_path = path.clone();
+    let subtitle = path
+        .as_ref()
+        .map(|path| path.display().to_string());
+    let icon = if icon == "network" {
+        gpui::component::Icon::from(gpui::assets::IconName::Network)
+    } else {
+        gpui::component::Icon::default().path(icon)
     };
-    div()
-        .id(if is_home {
-            "place-drop-home"
-        } else {
-            "place-drop-documents"
-        })
+    let button = Button::new(id)
+        .custom(ui::sidebar_button_style(theme, selected, cx))
+        .small()
+        .w_full()
+        .h(px(46.0))
+        .rounded_sm()
+        .disabled(!is_available)
+        .accessibility_label(label)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            if let Some(path) = &click_path {
+                this.navigate_to(path.clone(), cx);
+            }
+        }))
+        .child(sidebar_button_content(
+            icon,
+            label.to_owned(),
+            subtitle,
+            selected,
+            is_available,
+            theme,
+        ));
+    let drop_id = match id {
+        "place-home" => "place-drop-home",
+        "place-desktop" => "place-drop-desktop",
+        "place-documents" => "place-drop-documents",
+        "place-downloads" => "place-drop-downloads",
+        "place-network" => "place-drop-network",
+        _ => id,
+    };
+    let menu_path = path.clone();
+    let menu_view = cx.entity().downgrade();
+    let row = div()
+        .id(drop_id)
+        .debug_selector(move || drop_id.to_owned())
         .w_full()
         .min_w(px(0.0))
-        .child(item)
+        .child(button)
         .when_some(drop_directory, |area, directory| {
             drop_service::folder_drop_area(area, directory, theme, drop_enabled, cx)
-        })
+        });
+    row.context_menu(move |menu, _, _| {
+        if let Some(path) = &menu_path {
+            file_actions::favorite_location_menu(
+                menu,
+                path.clone(),
+                menu_view.clone(),
+                language,
+                is_favorite,
+                true,
+            )
+        } else {
+            menu
+        }
+    })
+}
+
+fn network_location() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let candidates = vec![PathBuf::from("/Network")];
+    #[cfg(target_os = "linux")]
+    let candidates = dirs::runtime_dir()
+        .map(|runtime| vec![runtime.join("gvfs"), dirs::home_dir().unwrap_or_default().join(".gvfs")])
+        .unwrap_or_default();
+    #[cfg(target_os = "windows")]
+    let candidates = vec![PathBuf::from(r"\\")];
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let candidates: Vec<PathBuf> = Vec::new();
+
+    candidates.into_iter().find(|path| path.is_dir())
 }
 
 /// Renders a clickable table header that updates the active sort column and direction.
@@ -1890,6 +2052,8 @@ fn file_row(
     column_order: [SortColumn; 4],
     visible_columns: [bool; 4],
     column_widths: [f32; 3],
+    favorite_folders: Vec<PathBuf>,
+    show_favorites_view: bool,
     show_bottom_drop_border: bool,
     theme: Theme,
     drop_enabled: bool,
@@ -1916,21 +2080,36 @@ fn file_row(
     });
     let selected = selected_entry == Some(entry_name.as_str());
     let is_directory = entry.is_directory;
-    let target = search_target.unwrap_or_else(|| file_actions::EntryTarget {
-        name: entry.name.clone(),
-        key: entry_name.clone(),
-        is_directory,
-        path: current_directory
-            .map(|directory| directory.join(entry.source_path.as_deref().unwrap_or(&entry.name)))
-            .or_else(|| archive_path.map(Path::to_path_buf))
-            .unwrap_or_default(),
-        archive_entry: current_directory.is_none().then(|| entry_name.clone()),
-        password: archive_password,
+    let target = search_target.unwrap_or_else(|| {
+        if show_favorites_view {
+            let path = PathBuf::from(entry.source_path.as_deref().unwrap_or(&entry.name));
+            file_actions::EntryTarget {
+                name: entry.name.clone(),
+                key: path.to_string_lossy().into_owned(),
+                path,
+                archive_entry: None,
+                password: None,
+                is_directory: true,
+            }
+        } else {
+            file_actions::EntryTarget {
+                name: entry.name.clone(),
+                key: entry_name.clone(),
+                is_directory,
+                path: current_directory
+                    .map(|directory| directory.join(entry.source_path.as_deref().unwrap_or(&entry.name)))
+                    .or_else(|| archive_path.map(Path::to_path_buf))
+                    .unwrap_or_default(),
+                archive_entry: current_directory.is_none().then(|| entry_name.clone()),
+                password: archive_password,
+            }
+        }
     });
+    let is_favorite = favorite_folders.contains(&target.path);
     let click_target = target.clone();
     let drop_target = target.clone();
     let drag_target = target.clone();
-    let can_drag = target.archive_entry.is_none() && drop_enabled;
+    let can_drag = drop_enabled && (target.archive_entry.is_none() || !target.is_directory);
     let drop_to_directory = current_directory
         .map(Path::to_path_buf)
         .filter(|_| {
@@ -2014,8 +2193,9 @@ fn file_row(
                 let sources = std::slice::from_ref(&drag.target.path);
                 let accepted = drop_enabled
                     && if let Some(directory) = &internal_directory {
-                        sources.len() == 1
-                            && crate::transfer::can_move_to_directory(&sources[0], directory)
+                        drop_service::accepts_folder_drag(&drag.target, directory)
+                    } else if hover_target.is_directory && hover_target.archive_entry.is_none() {
+                        drop_service::accepts_folder_drag(&drag.target, &hover_target.path)
                     } else {
                         drop_service::accepts_entry_drop(&hover_target, sources)
                     };
@@ -2054,9 +2234,11 @@ fn file_row(
                     manager.active_browser = pane_index;
                     manager.inspector_focus = false;
                     if let Some(directory) = &internal_destination {
-                        manager.receive_folder_drop(
-                            directory,
-                            std::slice::from_ref(&drag.target.path),
+                        manager.receive_folder_drag(directory, &drag.target, window, cx);
+                    } else if drop_target.is_directory && drop_target.archive_entry.is_none() {
+                        manager.receive_folder_drag(
+                            &drop_target.path,
+                            &drag.target,
                             window,
                             cx,
                         );
@@ -2107,7 +2289,15 @@ fn file_row(
                     this.modal.is_some()
                 })
                 .unwrap_or(true);
-            file_actions::menu(menu, &target, menu_view.clone(), language, busy, cx)
+            file_actions::menu(
+                menu,
+                &target,
+                menu_view.clone(),
+                language,
+                busy,
+                is_favorite,
+                cx,
+            )
         })
 }
 
@@ -2170,9 +2360,9 @@ pub(crate) fn app_icon(name: &str, size: f32, color: u32) -> impl IntoElement {
 /// Returns the width-to-height ratio used to preserve an icon's source proportions.
 pub(crate) fn icon_aspect_ratio(name: &str) -> f32 {
     match name {
-        "arrow-down" | "arrow-up" | "document" | "image" | "audio" | "video" | "code" | "file"
+        "document" | "image" | "audio" | "video" | "code" | "file"
         | "archive" | "archive-locked" => 0.75,
-        "arrow-left" | "documents" => 0.875,
+        "documents" => 0.875,
         "csv" => 547.8 / 548.0,
         "chevron-left" => 0.625,
         "home" => 1.125,

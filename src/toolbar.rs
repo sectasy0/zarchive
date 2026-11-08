@@ -323,7 +323,7 @@ pub(crate) struct SearchField {
     input: Option<Entity<InputState>>,
     _subscription: Option<Subscription>,
     language: Option<Language>,
-    location: Option<(Option<PathBuf>, Option<PathBuf>, String)>,
+    location: Option<(Option<PathBuf>, Option<PathBuf>, String, bool)>,
     pub(crate) matches: std::collections::BTreeMap<String, ArchiveSearchMatch>,
     directory: Option<PathBuf>,
     searched_query: String,
@@ -448,7 +448,10 @@ fn refresh_archive_search(manager: &mut ArchiveManager, _window: &Window, cx: &m
     let query = manager.toolbar_search.query.clone();
     let parsed = crate::filters::parse_search(&query);
     let eligible = !parsed.invalid && (!parsed.text.trim().is_empty() || parsed.criteria.is_active());
-    let directory = manager.current_directory.clone();
+    let directory = manager
+        .current_directory
+        .clone()
+        .filter(|_| !manager.show_favorites);
     let sources = directory.as_ref().filter(|_| eligible).map(|directory| {
         manager.entries.iter().filter(|entry| !entry.is_directory)
             .filter(|entry| crate::archive::is_supported_archive(&directory.join(entry.source_path.as_deref().unwrap_or(&entry.name))))
@@ -524,6 +527,7 @@ pub(crate) fn prepare_search(
         manager.current_directory.clone(),
         manager.archive_path.clone(),
         manager.selected_folder.clone(),
+        manager.show_favorites,
     );
     if manager.toolbar_search.location.as_ref().is_some_and(|previous| previous != &location) {
         manager.toolbar_search.query.clear();

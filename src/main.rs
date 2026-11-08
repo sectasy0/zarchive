@@ -55,8 +55,7 @@ pub(crate) use app::{app_icon, format_size};
 use app::{entry_icon, file_icon, icon_aspect_ratio};
 
 pub(crate) use browser::{
-    SortColumn, default_directory, folder_tree, folders_count, read_directory,
-    sort_entries, visible_entries,
+    SortColumn, default_directory, folder_tree, read_directory, sort_entries, visible_entries,
 };
 pub(crate) use dialogs::modal_view;
 
@@ -191,6 +190,8 @@ struct ArchiveManager {
     theme_mode: ThemeMode,
     accent_color: AccentColor,
     default_location: Option<PathBuf>,
+    favorite_folders: Vec<PathBuf>,
+    recent_folders: Vec<PathBuf>,
     auto_calculate_folder_sizes: bool,
     advanced_settings: AdvancedSettings,
     shortcut_settings: shortcuts::ShortcutSettings,
@@ -227,6 +228,8 @@ struct BrowserTab {
     error: Option<String>,
     selected_folder: String,
     selected_entry: Option<String>,
+    show_favorites: bool,
+    return_to_favorites: bool,
     sort_column: SortColumn,
     sort_ascending: bool,
     column_order: [SortColumn; 4],
@@ -236,7 +239,7 @@ struct BrowserTab {
     directory_size_task: Option<u64>,
     directory_size_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     file_scroll: gpui::UniformListScrollHandle,
-    folder_scroll: gpui::ScrollHandle,
+    sidebar_scroll: gpui::ScrollHandle,
     toolbar_search: toolbar::SearchField,
     filters: filters::FilterBar,
     drop_marker_row: Option<usize>,
@@ -268,6 +271,8 @@ impl BrowserTab {
             error,
             selected_folder: String::new(),
             selected_entry: None,
+            show_favorites: false,
+            return_to_favorites: false,
             sort_column: SortColumn::Name,
             sort_ascending: true,
             column_order: [
@@ -282,7 +287,7 @@ impl BrowserTab {
             directory_size_task: None,
             directory_size_cancel: None,
             file_scroll: gpui::UniformListScrollHandle::new(),
-            folder_scroll: gpui::ScrollHandle::new(),
+            sidebar_scroll: gpui::ScrollHandle::new(),
             toolbar_search: toolbar::SearchField::default(),
             filters: filters::FilterBar::default(),
             drop_marker_row: None,
@@ -464,6 +469,7 @@ impl ArchiveManager {
             theme_mode: self.theme_mode,
             accent_color: self.accent_color,
             default_location: self.default_location.clone(),
+            favorite_folders: self.favorite_folders.clone(),
             auto_calculate_folder_sizes: self.auto_calculate_folder_sizes,
             advanced: self.advanced_settings,
             shortcuts: self.shortcut_settings.clone(),
@@ -498,7 +504,8 @@ impl ArchiveManager {
         if self.error.is_some() {
             return None;
         }
-        if self.current_directory.is_some()
+        if !self.show_favorites
+            && self.current_directory.is_some()
             && entries.iter().any(|entry| {
                 entry.is_directory
                     && !self
@@ -614,6 +621,9 @@ impl ArchiveManager {
 
     /// Reports whether Back can move to an earlier directory or out of an archive.
     fn can_navigate_back(&self) -> bool {
+        if self.show_favorites || self.return_to_favorites {
+            return true;
+        }
         if self.current_directory.is_none() {
             return self
                 .archive_path
@@ -626,8 +636,10 @@ impl ArchiveManager {
 
     /// Reports whether a later directory exists in the navigation history.
     fn can_navigate_forward(&self) -> bool {
-        self.current_directory.is_some()
-            && self.navigation_history_index + 1 < self.directory_history.len()
+        (self.show_favorites && self.return_to_favorites)
+            || (!self.show_favorites
+                && self.current_directory.is_some()
+                && self.navigation_history_index + 1 < self.directory_history.len())
     }
 
     /// Loads a history entry and updates the history index only after a successful read.
@@ -638,6 +650,9 @@ impl ArchiveManager {
         match read_directory(&path) {
             Ok(entries) => {
                 self.navigation_history_index = index;
+                self.record_recent_folder(&path);
+                self.show_favorites = false;
+                self.return_to_favorites = false;
                 self.install_directory(path, entries, cx);
             }
             Err(error) => {
@@ -650,7 +665,15 @@ impl ArchiveManager {
 
     /// Moves to the prior directory, or to the archive's containing directory.
     fn navigate_back(&mut self, cx: &mut Context<Self>) {
-        if self.current_directory.is_none() {
+        if self.show_favorites {
+            self.show_favorites = false;
+            self.selected_entry = None;
+            cx.notify();
+        } else if self.return_to_favorites {
+            self.show_favorites = true;
+            self.selected_entry = None;
+            cx.notify();
+        } else if self.current_directory.is_none() {
             if let Some(parent) = self.archive_path.as_deref().and_then(Path::parent) {
                 self.navigate_to(parent.to_path_buf(), cx);
             }
@@ -661,7 +684,11 @@ impl ArchiveManager {
 
     /// Moves to the next directory in history when one is available.
     fn navigate_forward(&mut self, cx: &mut Context<Self>) {
-        if self.can_navigate_forward() {
+        if self.show_favorites && self.return_to_favorites {
+            self.show_favorites = false;
+            self.selected_entry = None;
+            cx.notify();
+        } else if self.can_navigate_forward() {
             self.navigate_history_to(self.navigation_history_index + 1, cx);
         }
     }
@@ -673,6 +700,8 @@ impl ArchiveManager {
         entries: Vec<ArchiveEntry>,
         _cx: &mut Context<Self>,
     ) {
+        self.show_favorites = false;
+        self.return_to_favorites = false;
         self.navigation_control.cancel();
         self.navigation_revision = self.navigation_revision.wrapping_add(1);
         self.cancel_directory_size_calculation();
@@ -687,6 +716,39 @@ impl ArchiveManager {
         self.selected_folder.clear();
         self.selected_entry = None;
         self.status_message = None;
+    }
+
+    fn record_recent_folder(&mut self, path: &Path) {
+        self.recent_folders.retain(|recent| recent != path);
+        self.recent_folders.insert(0, path.to_path_buf());
+        self.recent_folders.truncate(8);
+    }
+
+    pub(crate) fn toggle_favorite_folder(&mut self, path: PathBuf) {
+        if let Some(index) = self.favorite_folders.iter().position(|favorite| favorite == &path) {
+            self.favorite_folders.remove(index);
+        } else if path.is_dir() {
+            self.favorite_folders.insert(0, path);
+            self.favorite_folders.truncate(100);
+        }
+        self.save_preferences();
+    }
+
+    pub(crate) fn enter_favorites_view(&mut self, cx: &mut Context<Self>) {
+        self.show_favorites = true;
+        self.return_to_favorites = false;
+        self.selected_entry = None;
+        self.selected_folder.clear();
+        self.status_message = None;
+        cx.notify();
+    }
+
+    pub(crate) fn navigate_to_favorite(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.navigate_to(path.clone(), cx);
+        if self.current_directory.as_ref() == Some(&path) {
+            self.return_to_favorites = true;
+            cx.notify();
+        }
     }
 
     /// Captures the backdrop, opens a modal, and transfers focus into it.
@@ -759,7 +821,10 @@ impl ArchiveManager {
     fn navigate_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         match read_directory(&path) {
             Ok(entries) => {
+                self.show_favorites = false;
+                self.return_to_favorites = false;
                 if self.current_directory.as_ref() != Some(&path) {
+                    self.record_recent_folder(&path);
                     let history_index = self.navigation_history_index;
                     self.directory_history
                         .truncate(history_index.saturating_add(1));
@@ -949,6 +1014,11 @@ fn main() {
                             entries,
                             error,
                         );
+                        let recent_folders = browsers[0].tabs[browsers[0].active_tab]
+                            .current_directory
+                            .clone()
+                            .into_iter()
+                            .collect();
                         ArchiveManager {
                             browsers,
                             active_browser: 0,
@@ -967,6 +1037,8 @@ fn main() {
                             theme_mode: preferences.theme_mode,
                             accent_color: preferences.accent_color,
                             default_location: preferences.default_location.clone(),
+                            favorite_folders: preferences.favorite_folders.clone(),
+                            recent_folders,
                             auto_calculate_folder_sizes: preferences.auto_calculate_folder_sizes,
                             advanced_settings: preferences.advanced,
                             shortcut_settings: preferences.shortcuts.clone(),
@@ -1101,6 +1173,8 @@ mod tests {
             theme_mode: ThemeMode::System,
             accent_color: AccentColor::Blue,
             default_location: None,
+            favorite_folders: Vec::new(),
+            recent_folders: Vec::new(),
             auto_calculate_folder_sizes: true,
             advanced_settings: AdvancedSettings::default(),
             shortcut_settings: crate::shortcuts::ShortcutSettings::default(),
@@ -1829,6 +1903,120 @@ mod tests {
         let type_header = cx.debug_bounds("sort-type").unwrap();
         let modified_header = cx.debug_bounds("sort-modified").unwrap();
         assert!(type_header.origin.x > modified_header.origin.x);
+    }
+
+    #[gpui::test]
+    fn sidebar_places_and_recent_folders_navigate(cx: &mut gpui::TestAppContext) {
+        use gpui::test::TestWindowExt;
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let first_path = first.path().to_path_buf();
+        let second_path = second.path().to_path_buf();
+        let (view, cx) = component_window(cx, |_, cx| {
+            let mut manager = test_manager(cx);
+            manager.current_directory = Some(first_path.clone());
+            manager.entries = super::read_directory(&first_path).unwrap();
+            manager.auto_calculate_folder_sizes = false;
+            manager.favorite_folders = vec![first_path.clone()];
+            manager.recent_folders = vec![first_path.clone()];
+            manager
+        });
+
+        for place in [
+            "place-drop-home",
+            "place-drop-desktop",
+            "place-drop-documents",
+            "place-drop-downloads",
+            "place-drop-network",
+        ] {
+            assert!(cx.debug_bounds(place).is_some(), "missing sidebar place {place}");
+        }
+        assert!(cx.update(|window, _| window.find("place-favorites-toggle").bounds()).size.height > gpui::px(0.0));
+        cx.update(|window, cx| window.click("place-favorites-toggle", cx));
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert!(manager.active_browser_tab().show_favorites);
+            assert_eq!(manager.current_directory.as_deref(), Some(first_path.as_path()));
+        });
+        let favorite_row = cx.update(|window, _| {
+            window
+                .find(gpui::SharedString::from(first_path.to_string_lossy().into_owned()))
+                .bounds()
+        });
+        assert!(favorite_row.size.height > gpui::px(0.0));
+        view.update(cx, |manager, cx| {
+            manager.open_entry(
+                &crate::file_actions::EntryTarget {
+                    name: first_path.file_name().unwrap().to_string_lossy().into_owned(),
+                    key: first_path.to_string_lossy().into_owned(),
+                    path: first_path.clone(),
+                    archive_entry: None,
+                    password: None,
+                    is_directory: true,
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert!(!manager.active_browser_tab().show_favorites);
+            assert_eq!(manager.current_directory.as_deref(), Some(first_path.as_path()));
+            assert!(manager.active_browser_tab().return_to_favorites);
+        });
+        view.update(cx, |manager, cx| manager.navigate_back(cx));
+        cx.run_until_parked();
+        cx.read(|cx| assert!(view.read(cx).active_browser_tab().show_favorites));
+        assert!(cx.debug_bounds("recent-folder-0").is_some());
+
+        view.update(cx, |manager, cx| manager.navigate_to(second_path.clone(), cx));
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert_eq!(
+                view.read(cx).recent_folders,
+                [second_path.clone(), first_path.clone()]
+            );
+        });
+
+        let first_recent = cx.debug_bounds("recent-folder-1").unwrap();
+        cx.simulate_click(first_recent.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert_eq!(manager.current_directory.as_deref(), Some(first_path.as_path()));
+            assert_eq!(manager.recent_folders, [first_path.clone(), second_path.clone()]);
+        });
+    }
+
+    #[gpui::test]
+    fn favorite_folders_toggle_in_order_and_persist(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let settings_path = directory.path().join("settings.json");
+        let (view, cx) = component_window(cx, |_, cx| {
+            let mut manager = test_manager(cx);
+            manager.preferences_path = Some(settings_path.clone());
+            manager
+        });
+
+        view.update(cx, |manager, cx| {
+            manager.toggle_favorite_folder(first.clone());
+            manager.toggle_favorite_folder(second.clone());
+            manager.toggle_favorite_folder(first.clone());
+            cx.notify();
+        });
+
+        cx.read(|cx| {
+            assert_eq!(view.read(cx).favorite_folders, [second.clone()]);
+        });
+        assert_eq!(
+            crate::UserPreferences::load(&settings_path).favorite_folders,
+            [second]
+        );
     }
 
     #[gpui::test]

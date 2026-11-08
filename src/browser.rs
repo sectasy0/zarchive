@@ -121,11 +121,6 @@ pub(crate) fn folder_tree(entries: &[ArchiveEntry]) -> Vec<(String, String, usiz
         .collect()
 }
 
-/// Counts all unique folders represented by an archive's entry paths.
-pub(crate) fn folders_count(entries: &[ArchiveEntry]) -> usize {
-    folder_tree(entries).len()
-}
-
 /// Projects an archive listing to the immediate children of one selected folder.
 pub(crate) fn visible_entries(
     entries: &[ArchiveEntry],

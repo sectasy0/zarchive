@@ -300,6 +300,9 @@ pub(crate) fn resize_preview(
 impl ArchiveManager {
     /// Resolves the selected filesystem item or current archive for inspection.
     pub fn inspection_target(&self) -> Option<(PathBuf, Option<ArchivePassword>)> {
+        if self.show_favorites {
+            return None;
+        }
         if let Some(target) = self.selected_search_target() { return Some((target.path.clone(), target.password.clone())); }
         if let Some(directory) = &self.current_directory {
             let selected = self.selected_entry.as_deref()?;

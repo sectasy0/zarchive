@@ -10,7 +10,7 @@ use gpui::component::{
     IndexPath, Sizable, WindowExt,
     select::{SearchableVec, Select, SelectEvent, SelectGroup, SelectState},
 };
-use gpui::{Context, Entity, IntoElement, SharedString, Subscription, Window, prelude::*};
+use gpui::{App, Context, Entity, IntoElement, SharedString, Subscription, Window, prelude::*, rgb};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -30,6 +30,22 @@ pub enum Selector {
     VolumeUnit,
     RecoveryPercent,
     ConversionFormat,
+}
+
+pub(crate) fn sidebar_button_style(
+    theme: crate::Theme,
+    selected: bool,
+    cx: &App,
+) -> gpui::component::button::ButtonCustomVariant {
+    gpui::component::button::ButtonCustomVariant::new(cx)
+        .color(if selected {
+            gpui::rgba((theme.accent << 8) | 0x20).into()
+        } else {
+            gpui::transparent_black().into()
+        })
+        .foreground(rgb(theme.text).into())
+        .hover(gpui::rgba((theme.text << 8) | 0x0c).into())
+        .active(gpui::rgba((theme.accent << 8) | 0x30).into())
 }
 
 /// Retains selector options, selected index, and its event subscription.
@@ -62,7 +78,6 @@ pub struct Controls {
     selects: BTreeMap<Selector, SelectControl>,
     modal: Option<crate::Modal>,
     modal_generation: u64,
-    modal_height: Option<gpui::Pixels>,
     dark: Option<bool>,
     accent_color: Option<crate::AccentColor>,
     language: Option<Language>,
@@ -314,7 +329,6 @@ pub fn prepare(
             manager.password_blur.clear();
         }
         manager.controls.modal_generation += 1;
-        manager.controls.modal_height = None;
         let generation = manager.controls.modal_generation;
         manager.controls.modal = manager.modal;
         if let Some(modal) = manager.modal {
@@ -462,75 +476,13 @@ pub fn center_dialog(
     dialog: gpui::component::dialog::Dialog,
     title: &'static str,
     footer: gpui::AnyElement,
-    manager: &ArchiveManager,
-    window: &Window,
-    cx: &mut Context<ArchiveManager>,
 ) -> gpui::component::dialog::Dialog {
-    use std::{cell::Cell, rc::Rc};
-    let height = manager.controls.modal_height;
-    let generation = manager.controls.modal_generation;
-    let top = Rc::new(Cell::new(None::<gpui::Pixels>));
-    let title_top = top.clone();
-    let view = cx.entity().downgrade();
     dialog
         .p(gpui::px(16.0))
-        .entrance(if height.is_some() {
-            gpui::component::dialog::DialogEntrance::None
-        } else {
-            gpui::component::dialog::DialogEntrance::Fade
-        })
-        .margin_top(
-            ((window.viewport_size().height - height.unwrap_or(gpui::px(300.0))) / 2.0)
-                .max(gpui::px(16.0)),
-        )
-        .title(
-            gpui::div().relative().child(title).child(
-                gpui::canvas(
-                    move |bounds, _, _| title_top.set(Some(bounds.origin.y)),
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .inset_0(),
-            ),
-        )
-        .footer(
-            gpui::div()
-                .relative()
-                .min_h(gpui::px(1.0))
-                .child(footer)
-                .child(
-                    gpui::canvas(
-                        move |bounds, window, cx| {
-                            let Some(top) = top.get() else {
-                                return;
-                            };
-                            let measured_height = bounds.bottom() - top + gpui::px(32.0);
-                            if height.is_some_and(|cached| {
-                                (cached - measured_height).abs() <= gpui::px(0.5)
-                            }) {
-                                return;
-                            }
-                            let height = measured_height;
-                            let view = view.clone();
-                            window.defer(cx, move |_, cx| {
-                                let _ = view.update(cx, |manager, cx| {
-                                    if manager.controls.modal_generation == generation
-                                        && manager.controls.modal_height.is_none_or(|cached| {
-                                            (cached - height).abs() > gpui::px(0.5)
-                                        })
-                                    {
-                                        manager.controls.modal_height = Some(height);
-                                        cx.notify();
-                                    }
-                                });
-                            });
-                        },
-                        |_, _, _, _| {},
-                    )
-                    .absolute()
-                    .inset_0(),
-                ),
-        )
+        .entrance(gpui::component::dialog::DialogEntrance::Fade)
+        .centered()
+        .title(title)
+        .footer(footer)
 }
 
 /// Installs a modal and focuses its password field when the password dialog opens.
@@ -551,23 +503,6 @@ fn open_dialog(modal: crate::Modal, window: &mut Window, cx: &mut Context<Archiv
     }
 }
 
-#[derive(gpui::IntoElement)]
-/// Adapts a GPUI sidebar menu item to the application's render tree.
-pub struct NavigationItem {
-    /// Stable identifier used by GPUI for state and accessibility.
-    pub id: SharedString,
-    /// Sidebar item containing its label, icon, and interaction behavior.
-    pub item: gpui::component::sidebar::SidebarMenuItem,
-}
-
-impl gpui::RenderOnce for NavigationItem {
-    // Delegates rendering to the GPUI sidebar component with the stable item ID.
-    fn render(self, window: &mut Window, cx: &mut gpui::App) -> impl IntoElement {
-        use gpui::component::sidebar::SidebarItem;
-        self.item.render(self.id, window, cx)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,8 +520,8 @@ mod tests {
     }
 
     #[gpui::test]
-    /// Ensures a dialog is centered on its first visible frame and remains stable.
-    fn dialog_first_visible_frame_uses_measured_center_and_stays_stable(
+    /// Keeps dialogs centered through content-driven height changes.
+    fn dialogs_remain_centered_when_content_height_changes(
         cx: &mut gpui::TestAppContext,
     ) {
         let (view, cx) = crate::tests::component_window(cx, |_, cx| {
@@ -613,22 +548,15 @@ mod tests {
                 let _ = window.draw(cx);
                 window.simulate_next_frame(cx);
                 let _ = window.draw(cx);
-                assert!(view.read(cx).controls.modal_height.is_none());
-                assert!(
-                    !painted_dialog_surface(window, width),
-                    "measurement frame must not paint the dialog at a guessed position: {:?}",
-                    window
-                        .painted_quads()
-                        .into_iter()
-                        .filter(
-                            |quad| (quad.bounds.size.width.0 - width * window.scale_factor()).abs()
-                                <= 1.0
-                        )
-                        .map(|quad| (quad.bounds, quad.background, quad.border_color))
-                        .collect::<Vec<_>>()
-                );
             });
             cx.run_until_parked();
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(250));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            });
             let panel = cx.debug_bounds("dialog-0").unwrap();
             let background = cx.debug_bounds("modal-blurred-background").unwrap();
             assert!((panel.center().y - background.center().y).abs() <= gpui::px(1.0));
@@ -640,6 +568,20 @@ mod tests {
                 });
                 cx.run_until_parked();
                 assert_eq!(cx.debug_bounds("dialog-0").unwrap(), panel);
+            }
+            if modal == crate::Modal::CreateArchive {
+                let seven_zip_index = crate::archive::ResolvedFormat::CREATION_FORMATS
+                    .iter()
+                    .position(|format| *format == crate::archive::ResolvedFormat::SevenZip)
+                    .unwrap();
+                view.update(cx, |manager, cx| {
+                    manager.creation.apply(crate::creation::ChoiceField::Format, seven_zip_index);
+                    cx.notify();
+                });
+                cx.run_until_parked();
+                let resized = cx.debug_bounds("dialog-0").unwrap();
+                assert_ne!(resized.size.height, panel.size.height);
+                assert!((resized.center().y - background.center().y).abs() <= gpui::px(1.0));
             }
             cx.simulate_keystrokes("escape");
             cx.run_until_parked();
@@ -853,6 +795,8 @@ mod tests {
     fn settings_select_changes_language_and_theme_without_resetting_archive_state(
         cx: &mut gpui::TestAppContext,
     ) {
+        use gpui::test::TestWindowExt;
+
         let (view, cx) = crate::tests::component_window(cx, |window, cx| {
             let mut manager = crate::tests::test_manager(cx);
             manager.current_directory = None;
@@ -865,11 +809,18 @@ mod tests {
         let categories = cx
             .debug_bounds("settings-category-nav")
             .expect("settings categories are rendered");
+        let settings_category = cx
+            .update(|window, _| window.find("settings-category-general").bounds());
+        let place = cx
+            .debug_bounds("place-drop-home")
+            .expect("Home place button is rendered");
         let content = cx
             .debug_bounds("settings-category-content")
             .expect("settings content is rendered");
         assert!(categories.right() <= content.origin.x);
         assert!(content.right() <= layout.right());
+        assert_eq!(settings_category.size.height, gpui::px(34.0));
+        assert!(place.size.height > settings_category.size.height);
         let default_location = cx
             .debug_bounds("default-location-field")
             .expect("default location field is rendered");

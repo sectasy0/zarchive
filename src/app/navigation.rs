@@ -2,12 +2,28 @@ use crate::{
     ArchiveManager, archive::ArchiveEntry, browser, file_actions::EntryTarget, sort_entries,
 };
 use gpui::{Context, Window};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 impl ArchiveManager {
     pub(super) fn visible_browser_entries(&self) -> Vec<ArchiveEntry> {
         let query = self.toolbar_search.text_query();
-        let mut entries = if self.current_directory.is_some() {
+        let mut entries = if self.show_favorites {
+            self.favorite_folders
+                .iter()
+                .map(|path| ArchiveEntry {
+                    name: path
+                        .file_name()
+                        .unwrap_or(path.as_os_str())
+                        .to_string_lossy()
+                        .into_owned(),
+                    source_path: Some(path.to_string_lossy().into_owned()),
+                    size: 0,
+                    modified: None,
+                    is_directory: true,
+                    is_encrypted: false,
+                })
+                .collect()
+        } else if self.current_directory.is_some() {
             self.entries.clone()
         } else {
             browser::search_archive_entries(&self.entries, &self.selected_folder, &query)
@@ -15,7 +31,7 @@ impl ArchiveManager {
         if !query.is_empty() {
             entries.retain(|entry| entry.name.to_lowercase().contains(&query));
         }
-        if self.current_directory.is_some() {
+        if self.current_directory.is_some() && !self.show_favorites {
             entries.extend(
                 self.toolbar_search
                     .matches
@@ -40,6 +56,17 @@ impl ArchiveManager {
     }
 
     fn browser_entry_target(&self, entry: &ArchiveEntry) -> EntryTarget {
+        if self.show_favorites {
+            let path = PathBuf::from(entry.source_path.as_deref().unwrap_or(&entry.name));
+            return EntryTarget {
+                name: entry.name.clone(),
+                key: path.to_string_lossy().into_owned(),
+                path,
+                archive_entry: None,
+                password: None,
+                is_directory: true,
+            };
+        }
         let key = entry.source_path.clone().unwrap_or_else(|| {
             if self.selected_folder.is_empty() {
                 entry.name.clone()

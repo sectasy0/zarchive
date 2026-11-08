@@ -15,9 +15,6 @@ impl AssetSource for IconAssets {
             "icons/archive.svg" => include_bytes!("../assets/icons/archive.svg"),
             "icons/archive-locked.svg" => include_bytes!("../assets/icons/archive-locked.svg"),
             "icons/binary.svg" => include_bytes!("../assets/icons/binary.svg"),
-            "icons/arrow-down.svg" => include_bytes!("../assets/icons/arrow-down.svg"),
-            "icons/arrow-left.svg" => include_bytes!("../assets/icons/arrow-left.svg"),
-            "icons/arrow-up.svg" => include_bytes!("../assets/icons/arrow-up.svg"),
             "icons/audio.svg" => include_bytes!("../assets/icons/audio.svg"),
             "icons/chevron-down.svg" => include_bytes!("../assets/icons/chevron-down.svg"),
             "icons/chevron-left.svg" => include_bytes!("../assets/icons/chevron-left.svg"),
@@ -40,6 +37,9 @@ impl AssetSource for IconAssets {
             "icons/box-open.svg" => include_bytes!("../assets/icons/box-open.svg"),
             "icons/folder-open.svg" => include_bytes!("../assets/icons/folder-open.svg"),
             "icons/shield-halved.svg" => include_bytes!("../assets/icons/shield-halved.svg"),
+            "icons/downloads.svg" => include_bytes!("../assets/icons/downloads.svg"),
+            "icons/keyboard.svg" => include_bytes!("../assets/icons/keyboard.svg"),
+            "icons/swatchbook.svg" => include_bytes!("../assets/icons/swatchbook.svg"),
             _ => return gpui::AssetSource::load(&gpui::assets::AllAssets, path).or(Ok(None)),
         };
         Ok(Some(Cow::Borrowed(svg)))
@@ -55,9 +55,6 @@ impl AssetSource for IconAssets {
             "archive-locked.svg",
             "binary.svg",
             "shield-halved.svg",
-            "arrow-down.svg",
-            "arrow-left.svg",
-            "arrow-up.svg",
             "audio.svg",
             "chevron-down.svg",
             "chevron-left.svg",
@@ -79,7 +76,10 @@ impl AssetSource for IconAssets {
             "xmark.svg",
             "box-open.svg",
             "shield-halved.svg",
+            "swatchbook.svg",
+            "keyboard.svg",
             "folder-open.svg",
+            "downloads.svg",
         ]
         .into_iter()
         .map(SharedString::from)
@@ -98,9 +98,6 @@ mod tests {
             "icons/archive.svg",
             "icons/archive-locked.svg",
             "icons/binary.svg",
-            "icons/arrow-down.svg",
-            "icons/arrow-left.svg",
-            "icons/arrow-up.svg",
             "icons/audio.svg",
             "icons/chevron-down.svg",
             "icons/chevron-left.svg",
@@ -122,7 +119,11 @@ mod tests {
             "icons/xmark.svg",
             "icons/box-open.svg",
             "icons/shield-halved.svg",
-            "icons/folder-open.svg",        ];
+            "icons/folder-open.svg",
+            "icons/downloads.svg",
+            "icons/keyboard.svg",
+            "icons/swatchbook.svg"
+        ];
 
         for path in paths {
             let asset = <IconAssets as gpui::AssetSource>::load(&IconAssets, path)

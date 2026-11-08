@@ -81,6 +81,30 @@ pub(crate) fn accepts_entry_drop(destination: &EntryTarget, sources: &[PathBuf])
     }
 }
 
+pub(crate) fn accepts_folder_drag(target: &EntryTarget, directory: &Path) -> bool {
+    if target.archive_entry.is_some() {
+        if target.is_directory || !archive::can_extract_archive(&target.path) {
+            return false;
+        }
+        let Some(entry) = target.archive_entry.as_deref() else {
+            return false;
+        };
+        let Ok(relative) = archive::safe_extraction_path(entry) else {
+            return false;
+        };
+        let Some(name) = relative.file_name() else {
+            return false;
+        };
+        return std::fs::canonicalize(directory)
+            .ok()
+            .filter(|directory| directory.is_dir())
+            .is_some_and(|directory| {
+                std::fs::symlink_metadata(directory.join(name)).is_err()
+            });
+    }
+    crate::transfer::can_move_to_directory(&target.path, directory)
+}
+
 pub(crate) fn folder_drop_area(
     area: gpui::Stateful<gpui::Div>,
     directory: PathBuf,
@@ -93,7 +117,7 @@ pub(crate) fn folder_drop_area(
     let external_target = directory.clone();
     area.border_l_2().border_color(gpui::transparent_black())
         .drag_over::<ArchiveFileDrag>(move |style, drag, _, _| {
-            let accepted = enabled && crate::transfer::can_move_to_directory(&drag.target.path, &internal_hover);
+            let accepted = enabled && accepts_folder_drag(&drag.target, &internal_hover);
             style.bg(gpui::rgba(if accepted { (theme.accent << 8) | 0x2a } else { 0xef44441a }))
                 .border_color(rgb(if accepted { theme.accent } else { 0xef4444 }))
         })
@@ -105,7 +129,7 @@ pub(crate) fn folder_drop_area(
         })
         .on_drop(cx.listener(move |manager, drag: &ArchiveFileDrag, window, cx| {
             cx.stop_propagation();
-            manager.receive_folder_drop(&directory, std::slice::from_ref(&drag.target.path), window, cx);
+            manager.receive_folder_drag(&directory, &drag.target, window, cx);
         }))
         .on_drop(cx.listener(move |manager, paths: &gpui::ExternalPaths, window, cx| {
             cx.stop_propagation();
@@ -114,6 +138,29 @@ pub(crate) fn folder_drop_area(
 }
 
 impl ArchiveManager {
+    pub(crate) fn receive_folder_drag(
+        &mut self,
+        directory: &Path,
+        target: &EntryTarget,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if target.archive_entry.is_some() {
+            if accepts_folder_drag(target, directory) {
+                self.extract_archive_entry_to_folder(target, directory, window, cx);
+            } else {
+                self.status_message = Some(format!(
+                    "{}: {}",
+                    self.language.text("Failed to extract"),
+                    self.language.text("This location cannot accept the dropped files")
+                ));
+                cx.notify();
+            }
+        } else {
+            self.receive_folder_drop(directory, std::slice::from_ref(&target.path), window, cx);
+        }
+    }
+
     pub(crate) fn receive_entry_drop(&mut self, destination: &EntryTarget, sources: &[PathBuf], window: &Window, cx: &mut Context<Self>) {
         if destination.is_directory && destination.archive_entry.is_none() {
             self.receive_folder_drop(&destination.path, sources, window, cx);
@@ -242,7 +289,11 @@ mod tests {
         use gpui::test::TestWindowExt;
         fn drag(cx: &mut gpui::VisualTestContext, source: &Path, destination: gpui::SharedString) {
             let start = cx.update(|window, _| window.find(gpui::SharedString::from(source.to_string_lossy().into_owned())).bounds()).center();
-            let end = cx.update(|window, _| window.find(destination).bounds()).center();
+            let end = match destination.as_ref() {
+                "recent-folder-0" => cx.debug_bounds("recent-folder-0").unwrap().center(),
+                "recent-folder-1" => cx.debug_bounds("recent-folder-1").unwrap().center(),
+                _ => cx.update(|window, _| window.find(destination).bounds()).center(),
+            };
             cx.simulate_mouse_move(start, None, gpui::Modifiers::default());
             cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
             cx.simulate_mouse_move(start + gpui::point(px(20.0), px(0.0)), gpui::MouseButton::Left, gpui::Modifiers::default());
@@ -265,13 +316,16 @@ mod tests {
             let mut manager = crate::tests::test_manager(cx);
             manager.current_directory = Some(directory.path().to_path_buf());
             manager.entries = crate::read_directory(directory.path()).unwrap();
+            manager.recent_folders = vec![destination.clone()];
             manager
         });
         drag(cx, &file, gpui::SharedString::from(destination.to_string_lossy().into_owned()));
         finish_addition(&view, cx);
         assert!(!file.exists());
         assert_eq!(std::fs::read_to_string(destination.join("notes.txt")).unwrap(), "notes 中文");
-        drag(cx, &archive, "folder:destination:1".into());
+        cx.read(|cx| assert!(!view.read(cx).recent_folders.is_empty()));
+        assert!(cx.debug_bounds("recent-folder-0").is_some());
+        drag(cx, &archive, "recent-folder-0".into());
         finish_addition(&view, cx);
         assert!(!archive.exists());
         assert!(archive::list_archive(&destination.join("bundle.zip")).unwrap().iter().any(|entry| entry.name == "notes.txt"));
@@ -301,6 +355,64 @@ mod tests {
             if !cx.read(|cx| view.read(cx).file_actions.operations.is_busy()) { return; }
         }
         panic!("archive update did not finish");
+    }
+
+    #[gpui::test]
+    fn archive_file_drag_extracts_one_entry_into_the_other_browser_folder(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::test::TestWindowExt;
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("destination");
+        let source_file = directory.path().join("notes.txt");
+        let archive_path = directory.path().join("source.zip");
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(&source_file, b"archive entry contents").unwrap();
+        archive::create_zip(&archive_path, std::slice::from_ref(&source_file)).unwrap();
+
+        let (view, cx) = crate::tests::component_window(cx, |_, cx| {
+            crate::tests::test_manager(cx)
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |manager, cx| {
+                manager.receive_external_paths(&[directory.path().to_path_buf()], window, cx);
+                manager.active_browser = 1;
+                manager.receive_external_paths(&[directory.path().to_path_buf()], window, cx);
+                manager.active_browser = 0;
+                manager.receive_external_paths(&[archive_path.clone()], window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let source = cx.debug_bounds("file:notes.txt").unwrap().center();
+        let target = cx
+            .update(|window, _| {
+                window
+                    .find(gpui::SharedString::from(
+                        destination.to_string_lossy().into_owned(),
+                    ))
+                    .bounds()
+            })
+            .center();
+        cx.simulate_mouse_move(source, None, gpui::Modifiers::default());
+        cx.simulate_mouse_down(source, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            source + gpui::point(gpui::px(20.0), gpui::px(0.0)),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.simulate_mouse_move(target, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_mouse_up(target, gpui::MouseButton::Left, gpui::Modifiers::default());
+        finish_addition(&view, cx);
+
+        assert_eq!(
+            std::fs::read(destination.join("notes.txt")).unwrap(),
+            b"archive entry contents"
+        );
+        assert!(archive_path.is_file());
+        assert_eq!(archive::list_archive(&archive_path).unwrap().len(), 1);
     }
 
     #[gpui::test]

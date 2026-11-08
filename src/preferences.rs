@@ -159,6 +159,8 @@ pub(crate) struct UserPreferences {
     pub(crate) accent_color: AccentColor,
     /// Optional startup directory override.
     pub(crate) default_location: Option<PathBuf>,
+    /// User-pinned filesystem directories shown in the sidebar.
+    pub(crate) favorite_folders: Vec<PathBuf>,
     pub(crate) auto_calculate_folder_sizes: bool,
     pub(crate) advanced: AdvancedSettings,
     pub(crate) shortcuts: crate::shortcuts::ShortcutSettings,
@@ -172,6 +174,7 @@ impl Default for UserPreferences {
             theme_mode: ThemeMode::default(),
             accent_color: AccentColor::default(),
             default_location: None,
+            favorite_folders: Vec::new(),
             auto_calculate_folder_sizes: true,
             advanced: AdvancedSettings::default(),
             shortcuts: crate::shortcuts::ShortcutSettings::default(),
@@ -212,6 +215,7 @@ impl UserPreferences {
                 .get("default_location")
                 .and_then(serde_json::Value::as_str)
                 .map(PathBuf::from),
+            favorite_folders: load_favorite_folders(&value),
             auto_calculate_folder_sizes: value
                 .get("auto_calculate_folder_sizes")
                 .and_then(serde_json::Value::as_bool)
@@ -266,6 +270,7 @@ impl UserPreferences {
             },
             "accent": self.accent_color.key(),
             "default_location": self.default_location.as_ref().map(|path| path.to_string_lossy()),
+            "favorite_folders": self.favorite_folders.iter().map(|path| path.to_string_lossy().into_owned()).collect::<Vec<_>>(),
             "auto_calculate_folder_sizes": self.auto_calculate_folder_sizes,
             "shortcuts": self.shortcuts.json(),
             "advanced": {
@@ -278,6 +283,22 @@ impl UserPreferences {
         std::fs::write(path, serde_json::to_vec_pretty(&value)?)?;
         Ok(())
     }
+}
+
+fn load_favorite_folders(value: &serde_json::Value) -> Vec<PathBuf> {
+    let mut favorites = Vec::new();
+    if let Some(paths) = value
+        .get("favorite_folders")
+        .and_then(serde_json::Value::as_array)
+    {
+        for path in paths.iter().filter_map(serde_json::Value::as_str).take(100) {
+            let path = PathBuf::from(path);
+            if !favorites.contains(&path) {
+                favorites.push(path);
+            }
+        }
+    }
+    favorites
 }
 
 /// Returns the platform configuration path used for ZArchive preferences.
@@ -334,6 +355,7 @@ mod tests {
                 theme_mode: ThemeMode::Dark,
                 accent_color: AccentColor::Rose,
                 default_location: Some(location.clone()),
+                favorite_folders: vec![location.clone()],
                 auto_calculate_folder_sizes: false,
                 advanced: AdvancedSettings::default(),
                 shortcuts: crate::shortcuts::ShortcutSettings::default(),

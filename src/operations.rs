@@ -4,7 +4,8 @@ use crate::{
     ArchiveManager, archive, file_actions::EntryTarget, password::ArchivePassword, transfer,
 };
 use gpui::{Context, Window};
-use std::path::PathBuf;
+use anyhow::Context as _;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone)]
 /// A filesystem operation whose work can run independently from the UI thread.
@@ -156,6 +157,9 @@ impl ArchiveManager {
 
     /// Resolves the selected row or open archive as an extraction target.
     fn current_extraction_target(&self) -> Option<EntryTarget> {
+        if self.show_favorites {
+            return None;
+        }
         if let Some(target) = self.selected_search_target() { return Some(target.clone()); }
         if let Some(directory) = &self.current_directory {
             let selected = self.selected_entry.as_deref()?;
@@ -313,6 +317,58 @@ impl ArchiveManager {
             transfer::extraction_folder_name(&target.path)
         };
         let destination = directory.join(name);
+        self.start_operation(
+            Operation::Extract {
+                target: target.clone(),
+                destination,
+            },
+            window,
+            cx,
+        );
+    }
+
+    pub(crate) fn extract_archive_entry_to_folder(
+        &mut self,
+        target: &EntryTarget,
+        directory: &Path,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let destination = (|| -> anyhow::Result<PathBuf> {
+            anyhow::ensure!(
+                target.archive_entry.is_some() && !target.is_directory,
+                "Only archive files can be dropped into a folder"
+            );
+            anyhow::ensure!(
+                archive::can_extract_archive(&target.path),
+                "This archive cannot be extracted"
+            );
+            let entry = target.archive_entry.as_deref().unwrap();
+            let relative = archive::safe_extraction_path(entry)?;
+            let name = relative
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("Archive entry has no filename"))?;
+            let directory = std::fs::canonicalize(directory)
+                .context("Destination folder is unavailable")?;
+            anyhow::ensure!(directory.is_dir(), "Destination is not a folder");
+            let destination = directory.join(name);
+            anyhow::ensure!(
+                std::fs::symlink_metadata(&destination).is_err(),
+                "The destination already exists"
+            );
+            Ok(destination)
+        })();
+        let destination = match destination {
+            Ok(destination) => destination,
+            Err(error) => {
+                self.status_message = Some(format!(
+                    "{}: {error:#}",
+                    self.language.text("Failed to extract")
+                ));
+                cx.notify();
+                return;
+            }
+        };
         self.start_operation(
             Operation::Extract {
                 target: target.clone(),
