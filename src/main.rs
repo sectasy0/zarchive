@@ -2305,6 +2305,9 @@ mod tests {
         cx.simulate_mouse_move(hide_button.center(), None, gpui::Modifiers::default());
         cx.simulate_click(hide_button.center(), gpui::Modifiers::default());
         cx.run_until_parked();
+        cx.read(|cx| assert!(!view.read(cx).notifications_visible));
+        cx.update(|window, cx| window.render_frame(cx));
+        cx.run_until_parked();
         assert!(cx.debug_bounds("notifications-toast").is_none());
 
         view.update(cx, |manager, cx| {
