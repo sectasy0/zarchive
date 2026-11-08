@@ -54,6 +54,16 @@ pub(crate) use app::{app_icon, format_size};
 #[cfg(test)]
 use app::{entry_icon, file_icon, icon_aspect_ratio};
 
+pub(crate) fn uses_windows_titlebar() -> bool {
+    if cfg!(target_os = "windows") {
+        return true;
+    }
+    #[cfg(test)]
+    return std::env::var_os("ZARCHIVE_TEST_WINDOWS_TITLEBAR").is_some();
+    #[cfg(not(test))]
+    false
+}
+
 pub(crate) use browser::{
     SortColumn, default_directory, folder_tree, read_directory, sort_entries, visible_entries,
 };

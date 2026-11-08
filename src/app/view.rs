@@ -468,7 +468,7 @@ impl Render for ArchiveManager {
                     this.receive_external_paths(paths.paths(), window, cx);
                 }),
             )
-            .child(if cfg!(target_os = "windows") {
+            .child(if crate::uses_windows_titlebar() {
                 div()
                     .id("windows-titlebar")
                     .flex()
@@ -485,6 +485,7 @@ impl Render for ArchiveManager {
                         self.can_navigate_forward(),
                         self.can_extract_current_archive(),
                         self.inspection_target().is_some(),
+                        window.bounds().size.width < px(760.0),
                         cx,
                     ))
                     .child(toolbar::windows_titlebar_controls(window, theme))
@@ -506,6 +507,7 @@ impl Render for ArchiveManager {
                         self.can_navigate_forward(),
                         self.can_extract_current_archive(),
                         self.inspection_target().is_some(),
+                        window.bounds().size.width < px(760.0),
                         cx,
                     ))
                     .into_any_element()

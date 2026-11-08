@@ -110,6 +110,8 @@ mod archive_search_tests {
         assert!(badges.left() >= search.left());
         assert!(badges.right() < clear.left());
         assert!(clear.right() <= search.right());
+        cx.simulate_resize(gpui::size(px(1100.0), px(720.0)));
+        cx.run_until_parked();
         cx.update(|window, cx| window.click("remove-search-filter:0", cx));
         cx.run_until_parked();
         assert!(cx.debug_bounds("search-filter-badge:min:1MiB").is_none());
@@ -661,6 +663,7 @@ fn dropdown_button(
     id: &'static str,
     icon: gpui::component::Icon,
     label: &'static str,
+    compact: bool,
     theme: Theme,
     cx: &App,
 ) -> Button {
@@ -671,6 +674,7 @@ fn dropdown_button(
     Button::new(id)
         .custom(style)
         .small()
+        .when(compact, |button| button.px_0())
         .accessibility_label(label)
         .tooltip(label)
         .child(
@@ -704,6 +708,7 @@ fn toolbar_icon_button(
     label: &'static str,
     icon_size: f32,
     icon_color: u32,
+    compact: bool,
     theme: Theme,
     cx: &App,
 ) -> Button {
@@ -714,6 +719,7 @@ fn toolbar_icon_button(
     Button::new(id)
         .custom(style)
         .small()
+        .when(compact, |button| button.px_1())
         .accessibility_label(label)
         .tooltip(label)
         .child(
@@ -893,6 +899,7 @@ pub(crate) fn toolbox_bar(
     can_navigate_forward: bool,
     can_extract: bool,
     can_inspect: bool,
+    compact: bool,
     cx: &mut Context<ArchiveManager>,
 ) -> impl IntoElement {
     let files_view = cx.entity().downgrade();
@@ -903,6 +910,7 @@ pub(crate) fn toolbox_bar(
         .flex()
         .items_center()
         .gap_1()
+        .when(compact, |this| this.gap_0())
         .child(
             toolbar_icon_button(
                 "navigate-back",
@@ -914,6 +922,7 @@ pub(crate) fn toolbox_bar(
                 } else {
                     theme.faint_text
                 },
+                compact,
                 theme,
                 cx,
             )
@@ -931,6 +940,7 @@ pub(crate) fn toolbox_bar(
                 } else {
                     theme.faint_text
                 },
+                compact,
                 theme,
                 cx,
             )
@@ -942,6 +952,7 @@ pub(crate) fn toolbox_bar(
                 "toolbar-files-dropdown",
                 gpui::component::Icon::default().path("icons/folder-open.svg"),
                 language.text("Files"),
+                compact,
                 theme,
                 cx,
             )
@@ -986,6 +997,7 @@ pub(crate) fn toolbox_bar(
                 "toolbar-extract-dropdown",
                 gpui::component::Icon::default().path("icons/box-open.svg"),
                 language.text("Extraction"),
+                compact,
                 theme,
                 cx,
             )
@@ -1023,6 +1035,7 @@ pub(crate) fn toolbox_bar(
                 "toolbar-inspect-dropdown",
                 gpui::component::Icon::default().path("icons/shield-halved.svg"),
                 language.text("Inspect"),
+                compact,
                 theme,
                 cx,
             )
@@ -1104,6 +1117,7 @@ pub(crate) fn toolbox_bar(
         .flex()
         .items_center()
         .gap_1()
+        .when(compact, |this| this.gap_0())
         .child(
             toolbar_icon_button(
                 "settings",
@@ -1111,6 +1125,7 @@ pub(crate) fn toolbox_bar(
                 language.text("Settings"),
                 16.0,
                 theme.soft_accent(),
+                compact,
                 theme,
                 cx,
             )
@@ -1125,6 +1140,7 @@ pub(crate) fn toolbox_bar(
                 language.text("About"),
                 16.0,
                 theme.soft_accent(),
+                compact,
                 theme,
                 cx,
             )
@@ -1147,13 +1163,13 @@ pub(crate) fn toolbox_bar(
         .border_color(rgb(theme.subtle_border))
         .px_2()
         .child(left)
-        .when(cfg!(target_os = "windows"), |this| {
+        .when(crate::uses_windows_titlebar(), |this| {
             this.child(
                 div()
                     .id("titlebar-drag-region")
-                    .flex_1()
                     .h_full()
-                    .min_w(px(24.0))
+                    .when(compact, |this| this.w(px(24.0)).flex_shrink_0())
+                    .when(!compact, |this| this.flex_1().min_w(px(24.0)))
                     .window_control_area(gpui::WindowControlArea::Drag),
             )
         })

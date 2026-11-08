@@ -654,8 +654,14 @@ mod tests {
                     "about",
                 ] {
                     let bounds = window.find(id).bounds();
-                    assert!(bounds.origin.x >= bar.origin.x && bounds.right() <= bar.right());
-                    assert!(bounds.origin.y >= bar.origin.y && bounds.bottom() <= bar.bottom());
+                    assert!(
+                        bounds.origin.x >= bar.origin.x && bounds.right() <= bar.right(),
+                        "{id} bounds {bounds:?} exceed toolbar bounds {bar:?}"
+                    );
+                    assert!(
+                        bounds.origin.y >= bar.origin.y && bounds.bottom() <= bar.bottom(),
+                        "{id} bounds {bounds:?} exceed toolbar bounds {bar:?}"
+                    );
                 }
             });
         }
