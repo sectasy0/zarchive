@@ -132,6 +132,7 @@ impl ArchiveManager {
                     }
                     Err(crate::task_queue::TaskFailure::Cancelled) => {},
                     Err(crate::task_queue::TaskFailure::Failed(_)) => {
+                        this.modal = Some(Modal::Password);
                         this.password_prompt.error = Some(
                             this.language
                                 .text("Incorrect password or damaged archive")

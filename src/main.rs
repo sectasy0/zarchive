@@ -2255,6 +2255,8 @@ mod tests {
     #[gpui::test]
     /// Displays loading, error, completion, and inspection-limit indicators as appropriate.
     fn status_bar_shows_loading_and_error_indicators(cx: &mut gpui::TestAppContext) {
+        use gpui::test::TestWindowExt;
+
         cx.update(|cx| cx.set_reduce_motion(true));
         let (view, cx) = component_window(cx, |_, cx| {
             let mut manager = test_manager(cx);
@@ -2299,10 +2301,8 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.debug_bounds("notifications-toast").is_some());
 
-        cx.simulate_click(
-            gpui::point(toast.right() - gpui::px(18.0), toast.top() + gpui::px(14.0)),
-            gpui::Modifiers::default(),
-        );
+        let hide_button = cx.update(|window, _| window.find("hide-notifications").bounds());
+        cx.simulate_click(hide_button.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("notifications-toast").is_none());
 
