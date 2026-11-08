@@ -2302,6 +2302,7 @@ mod tests {
         assert!(cx.debug_bounds("notifications-toast").is_some());
 
         let hide_button = cx.update(|window, _| window.find("hide-notifications").bounds());
+        cx.simulate_mouse_move(hide_button.center(), None, gpui::Modifiers::default());
         cx.simulate_click(hide_button.center(), gpui::Modifiers::default());
         cx.run_until_parked();
         assert!(cx.debug_bounds("notifications-toast").is_none());
