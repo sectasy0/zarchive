@@ -55,7 +55,7 @@ memchr = "2"
 lz4_flex = "0.14"
 lzma-rust2 = "0.24"
 open = "5"
- rfd = "0.15"
+rfd = "0.15"
 par2-rs = { version = "0.11", default-features = false, features = ["crypto-rust"] }
 roxmltree = "0.21"
 rust-par2 = "0.2"

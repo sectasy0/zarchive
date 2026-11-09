@@ -1,6 +1,6 @@
 //! Defines persisted appearance settings and their filesystem storage helpers.
 
-use crate::i18n::Language;
+use crate::{SortColumn, i18n::Language};
 use gpui::WindowAppearance;
 use std::path::{Path, PathBuf};
 
@@ -162,6 +162,8 @@ pub(crate) struct UserPreferences {
     /// User-pinned filesystem directories shown in the sidebar.
     pub(crate) favorite_folders: Vec<PathBuf>,
     pub(crate) auto_calculate_folder_sizes: bool,
+    pub(crate) column_order: [SortColumn; 4],
+    pub(crate) visible_columns: [bool; 4],
     pub(crate) advanced: AdvancedSettings,
     pub(crate) shortcuts: crate::shortcuts::ShortcutSettings,
 }
@@ -176,6 +178,8 @@ impl Default for UserPreferences {
             default_location: None,
             favorite_folders: Vec::new(),
             auto_calculate_folder_sizes: true,
+            column_order: default_column_order(),
+            visible_columns: [true; 4],
             advanced: AdvancedSettings::default(),
             shortcuts: crate::shortcuts::ShortcutSettings::default(),
         }
@@ -220,6 +224,8 @@ impl UserPreferences {
                 .get("auto_calculate_folder_sizes")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(true),
+            column_order: load_column_order(value.get("column_order")),
+            visible_columns: load_visible_columns(value.get("visible_columns")),
             advanced: {
                 let advanced = value.get("advanced");
                 AdvancedSettings {
@@ -272,6 +278,8 @@ impl UserPreferences {
             "default_location": self.default_location.as_ref().map(|path| path.to_string_lossy()),
             "favorite_folders": self.favorite_folders.iter().map(|path| path.to_string_lossy().into_owned()).collect::<Vec<_>>(),
             "auto_calculate_folder_sizes": self.auto_calculate_folder_sizes,
+            "column_order": self.column_order.map(column_key),
+            "visible_columns": self.visible_columns,
             "shortcuts": self.shortcuts.json(),
             "advanced": {
                 "preview_limit_kib": self.advanced.preview_limit_kib,
@@ -283,6 +291,54 @@ impl UserPreferences {
         std::fs::write(path, serde_json::to_vec_pretty(&value)?)?;
         Ok(())
     }
+}
+
+fn default_column_order() -> [SortColumn; 4] {
+    [
+        SortColumn::Name,
+        SortColumn::Type,
+        SortColumn::Size,
+        SortColumn::Modified,
+    ]
+}
+
+fn column_key(column: SortColumn) -> &'static str {
+    column.key()
+}
+
+fn load_column_order(value: Option<&serde_json::Value>) -> [SortColumn; 4] {
+    let Some(columns) = value.and_then(serde_json::Value::as_array) else {
+        return default_column_order();
+    };
+    let parsed: Vec<_> = columns
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .filter_map(|column| SortColumn::from_key(column))
+        .collect();
+    if parsed.len() != 4
+        || parsed
+            .iter()
+            .enumerate()
+            .any(|(index, column)| parsed[..index].contains(column))
+    {
+        return default_column_order();
+    }
+    [parsed[0], parsed[1], parsed[2], parsed[3]]
+}
+
+fn load_visible_columns(value: Option<&serde_json::Value>) -> [bool; 4] {
+    let Some(values) = value.and_then(serde_json::Value::as_array) else {
+        return [true; 4];
+    };
+    let Ok(values): Result<[bool; 4], _> = values
+        .iter()
+        .map(|value| value.as_bool().ok_or(()))
+        .collect::<Result<Vec<_>, _>>()
+        .and_then(|values| values.try_into().map_err(|_| ()))
+    else {
+        return [true; 4];
+    };
+    [true, values[1], values[2], values[3]]
 }
 
 fn load_favorite_folders(value: &serde_json::Value) -> Vec<PathBuf> {
@@ -316,7 +372,7 @@ pub(crate) fn load_user_preferences() -> UserPreferences {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccentColor, AdvancedSettings, ThemeMode, UserPreferences};
+    use super::{AccentColor, AdvancedSettings, SortColumn, ThemeMode, UserPreferences};
 
     #[test]
     /// Ensures system appearance follows the OS while explicit modes override it.
@@ -357,6 +413,13 @@ mod tests {
                 default_location: Some(location.clone()),
                 favorite_folders: vec![location.clone()],
                 auto_calculate_folder_sizes: false,
+                column_order: [
+                    SortColumn::Name,
+                    SortColumn::Modified,
+                    SortColumn::Type,
+                    SortColumn::Size,
+                ],
+                visible_columns: [true, false, true, true],
                 advanced: AdvancedSettings::default(),
                 shortcuts: crate::shortcuts::ShortcutSettings::default(),
             };

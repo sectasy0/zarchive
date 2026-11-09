@@ -2,6 +2,8 @@
 
 use super::*;
 use gpui::{RenderImage, img};
+use gpui::component::{input::Input, scroll::ScrollableElement};
+use gpui::base::StyledExt as _;
 use std::sync::{Arc, OnceLock};
 
 impl ArchiveManager {
@@ -81,6 +83,533 @@ fn setting_option(id: &'static str, label: &'static str, selected: bool, theme: 
         }))
         .when(selected, |this| this.bg(rgb(theme.selection)))
         .flex_1()
+}
+
+fn open_picker_view(
+    manager: &ArchiveManager,
+    theme: Theme,
+    window: &Window,
+    cx: &mut Context<ArchiveManager>,
+) -> impl IntoElement {
+    let picker = manager.file_actions.open_picker.as_ref().expect("Open picker is initialized");
+    let directory = picker.directory.clone();
+    let selected = picker.selected.clone();
+    let search = picker.search_input.read(cx).value().trim().to_lowercase();
+    let mut entries: Vec<_> = picker
+        .entries
+        .iter()
+            .filter(|entry| search.is_empty() || entry.name.to_lowercase().contains(&search))
+        .cloned()
+        .collect();
+    crate::sort_entries(&mut entries, SortColumn::Name, true);
+    let count = entries.len();
+    let language = manager.language;
+    let column_widths = manager.column_widths;
+    let active_directory = picker.directory.clone();
+    let place_row = |id: String, label: String, icon: &'static str, path: PathBuf| {
+        let selected = path == active_directory;
+        let selector = id.clone();
+        Button::new(gpui::SharedString::from(id))
+            .debug_selector(move || selector.clone())
+            .ghost()
+            .small()
+            .selected(selected)
+            .w_full()
+            .h(px(28.0))
+            .px_2()
+            .rounded_sm()
+            .text_sm()
+            .text_color(rgb(if selected { theme.text } else { theme.muted_text }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .w_full()
+                    .min_w(px(0.0))
+                    .child(crate::app_icon(icon, 14.0, theme.soft_accent()))
+                    .child(div().flex_1().min_w(px(0.0)).truncate().text_left().child(label)),
+            )
+            .on_click(cx.listener(move |manager, _, window, cx| {
+                manager.load_open_picker_directory(path.clone(), window, cx);
+            }))
+    };
+    let header = gpui::base::TableRow::new("open-picker-header", 0)
+        .flex()
+        .items_center()
+        .w_full()
+        .h(px(28.0))
+        .flex_shrink_0()
+        .pr_2()
+        .border_b_1()
+        .border_color(rgb(theme.border))
+        .bg(rgb(theme.sidebar))
+        .text_xs()
+        .text_color(rgb(theme.muted_text))
+        .child(
+            gpui::base::TableHead::new("open-picker-name-head", 0)
+                .flex()
+                .flex_1()
+                .min_w(px(0.0))
+                .pl_2()
+                .child(language.text("NAME")),
+        )
+        .child(
+            gpui::base::TableHead::new("open-picker-type-head", 1)
+                .w(px(column_widths[0]))
+                .flex_shrink_0()
+                .pl_2()
+                .child(language.text("TYPE")),
+        )
+        .child(
+            gpui::base::TableHead::new("open-picker-size-head", 2)
+                .w(px(column_widths[1]))
+                .flex_shrink_0()
+                .pl_2()
+                .child(language.text("SIZE")),
+        )
+        .child(
+            gpui::base::TableHead::new("open-picker-modified-head", 3)
+                .w(px(column_widths[2]))
+                .flex_shrink_0()
+                .pl_2()
+                .child(language.text("MODIFIED")),
+        );
+    let list = gpui::uniform_list(
+        "open-picker-rows",
+        count,
+        cx.processor(move |_manager, range: std::ops::Range<usize>, _, cx| {
+            range
+                .filter_map(|index| {
+                    let entry = entries.get(index)?;
+                    let name = entry.name.clone();
+                    let path = directory.join(entry.source_path.as_deref().unwrap_or(&name));
+                    let is_directory = entry.is_directory;
+                    let is_selected = selected.as_ref() == Some(&path);
+                    let icon = if is_directory {
+                        "folder"
+                    } else {
+                        crate::app::entry_icon(entry)
+                    };
+                    let type_label = if is_directory {
+                        language.text("Folder").to_owned()
+                    } else {
+                        name.rsplit_once('.')
+                            .map(|(_, extension)| extension.to_ascii_uppercase())
+                            .unwrap_or_else(|| language.text("File").to_owned())
+                    };
+                    let size = crate::format_size(entry.size);
+                    let modified = entry
+                        .modified
+                        .map_or_else(|| "—".to_owned(), |date| date.format("%Y-%m-%d").to_string());
+                    let click_path = path.clone();
+                    let activate_path = path.clone();
+                    Some(
+                        gpui::base::TableRow::new(("open-picker-row", index), index)
+                            .debug_selector(move || format!("open-picker-entry:{index}"))
+                            .flex()
+                            .items_center()
+                            .h(px(28.0))
+                            .w_full()
+                            .flex_shrink_0()
+                            .px_2()
+                            .border_b_1()
+                            .border_color(rgb(theme.subtle_border))
+                            .cursor_pointer()
+                            .bg(rgb(theme.surface))
+                            .when(is_selected, |this| this.bg(rgb(theme.selection)))
+                            .when(!is_selected, |this| this.hover(|style| style.bg(rgb(theme.hover))))
+                            .on_click(cx.listener(move |manager, event: &gpui::ClickEvent, window, cx| {
+                                if event.click_count() == 2 {
+                                    manager.activate_open_picker_entry(
+                                        activate_path.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                } else {
+                                    manager.select_open_picker_entry(click_path.clone(), cx);
+                                }
+                            }))
+                            .child(
+                                gpui::base::TableCell::new("open-picker-name-cell", 0)
+                                    .flex()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .items_center()
+                                    .gap_2()
+                                    .child(crate::app_icon(
+                                        icon,
+                                        16.0,
+                                        if is_directory || is_selected { theme.accent } else { theme.icon },
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.0))
+                                            .truncate()
+                                            .text_color(rgb(theme.text))
+                                            .child(name),
+                                    ),
+                            )
+                            .child(
+                                gpui::base::TableCell::new("open-picker-type-cell", 1)
+                                    .w(px(column_widths[0]))
+                                    .flex_shrink_0()
+                                    .pl_2()
+                                    .truncate()
+                                    .text_color(rgb(theme.muted_text))
+                                    .child(type_label),
+                            )
+                            .child(
+                                gpui::base::TableCell::new("open-picker-size-cell", 2)
+                                    .w(px(column_widths[1]))
+                                    .flex_shrink_0()
+                                    .pl_2()
+                                    .text_color(rgb(theme.muted_text))
+                                    .child(if is_directory { "—".to_owned() } else { size }),
+                            )
+                            .child(
+                                gpui::base::TableCell::new("open-picker-modified-cell", 3)
+                                    .w(px(column_widths[2]))
+                                    .flex_shrink_0()
+                                    .pl_2()
+                                    .text_color(rgb(theme.muted_text))
+                                    .child(modified),
+                            ),
+                    )
+                })
+                .collect()
+        }),
+    )
+    .track_scroll(&picker.scroll)
+    .flex()
+    .flex_col()
+    .flex_1()
+    .min_h(px(0.0));
+    let can_go_back = picker.history_index > 0;
+    let can_go_forward = picker.history_index + 1 < picker.history.len();
+    let picker_height = (window.viewport_size().height - px(160.0))
+        .min(px(500.0))
+        .max(px(220.0));
+    let mut places_content = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .px_1()
+        .py_2()
+        .child(
+            div()
+                .px_2()
+                .py_1()
+                .text_xs()
+                .font_semibold()
+                .text_color(rgb(theme.muted_text))
+                .child(language.text("PLACES")),
+        );
+    for (id, label, icon, path) in [
+        ("open-picker-home", "Home", "home", dirs::home_dir()),
+        ("open-picker-desktop", "Desktop", "folder", dirs::desktop_dir()),
+        ("open-picker-documents", "Documents", "documents", dirs::document_dir()),
+        ("open-picker-downloads", "Downloads", "downloads", dirs::download_dir()),
+    ] {
+        if let Some(path) = path.filter(|path| path.is_dir()) {
+            places_content = places_content.child(place_row(
+                id.to_owned(),
+                language.text(label).to_owned(),
+                icon,
+                path,
+            ));
+        }
+    }
+    let favorites: Vec<_> = manager
+        .favorite_folders
+        .iter()
+        .filter(|path| path.is_dir())
+        .cloned()
+        .collect();
+    if !favorites.is_empty() {
+        places_content = places_content.child(
+            div()
+                .mt_2()
+                .px_2()
+                .py_1()
+                .text_xs()
+                .font_semibold()
+                .text_color(rgb(theme.muted_text))
+                .child(language.text("FAVORITES")),
+        );
+        for (index, path) in favorites.iter().take(6).enumerate() {
+            let label = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned();
+            places_content = places_content.child(place_row(
+                format!("open-picker-favorite-{index}"),
+                label,
+                "folder",
+                path.clone(),
+            ));
+        }
+    }
+    let recent: Vec<_> = manager
+        .recent_folders
+        .iter()
+        .filter(|path| path.is_dir() && **path != active_directory)
+        .cloned()
+        .collect();
+    if !recent.is_empty() {
+        places_content = places_content.child(
+            div()
+                .mt_2()
+                .px_2()
+                .py_1()
+                .text_xs()
+                .font_semibold()
+                .text_color(rgb(theme.muted_text))
+                .child(language.text("RECENT FOLDERS")),
+        );
+        for (index, path) in recent.iter().take(6).enumerate() {
+            let label = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned();
+            places_content = places_content.child(place_row(
+                format!("open-picker-recent-{index}"),
+                label,
+                "folder",
+                path.clone(),
+            ));
+        }
+    }
+    let places_content = places_content
+        .overflow_y_scrollbar()
+        .id("open-picker-places-scroll")
+        .flex_1()
+        .min_h(px(0.0));
+    let places = div()
+        .id("open-picker-places")
+        .debug_selector(|| "open-picker-places".to_owned())
+        .relative()
+        .flex()
+        .flex_col()
+        .w(px(176.0))
+        .flex_shrink_0()
+        .min_h(px(0.0))
+        .overflow_hidden()
+        .bg(rgb(theme.surface))
+        .border_r_1()
+        .border_color(rgb(theme.subtle_border))
+        .child(places_content);
+    let table_area = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w(px(0.0))
+        .min_h(px(0.0))
+        .child(if count == 0 {
+            div()
+                .flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(rgb(theme.muted_text))
+                .child(language.text(if search.is_empty() { "This folder is empty" } else { "No matching items" }))
+                .into_any_element()
+        } else {
+            gpui::base::Table::new("open-picker-table")
+                .debug_selector(|| "open-picker-table".to_owned())
+                .flex()
+                .flex_col()
+                .flex_1()
+                .w_full()
+                .min_h(px(0.0))
+                .overflow_hidden()
+                .border_1()
+                .border_color(rgb(theme.border))
+                .child(header)
+                .child(
+                    gpui::base::TableBody::new("open-picker-body")
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .w_full()
+                        .min_h(px(0.0))
+                        .overflow_hidden()
+                        .child(list)
+                        .child(
+                            gpui::component::scroll::Scrollbar::vertical(&picker.scroll)
+                                .id("open-picker-scrollbar")
+                                .mode(gpui::component::scroll::ScrollbarMode::Always),
+                        ),
+                )
+                .into_any_element()
+        });
+    div()
+        .id("open-picker")
+        .debug_selector(|| "open-picker".to_owned())
+        .flex()
+        .flex_col()
+        .gap_0()
+        .w_full()
+        .h(picker_height)
+        .bg(rgb(theme.surface))
+        .px_0()
+        .child(
+            div()
+                .id("open-picker-toolbar")
+                .debug_selector(|| "open-picker-toolbar".to_owned())
+                .flex()
+                .items_center()
+                .gap_2()
+                .w_full()
+                .h(px(48.0))
+                .flex_shrink_0()
+                .px_2()
+                .border_b_1()
+                .border_color(rgb(theme.subtle_border))
+                .bg(rgb(theme.sidebar))
+                .child(
+                    div()
+                        .id("open-picker-navigation")
+                        .debug_selector(|| "open-picker-navigation".to_owned())
+                        .flex()
+                        .items_center()
+                        .gap_0()
+                        .h(px(26.0))
+                        .p(px(0.0))
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(rgb(theme.border))
+                        .bg(rgb(theme.surface))
+                        .child(
+                                    crate::toolbar::toolbar_icon_button(
+                                        "open-picker-back",
+                                        gpui::component::Icon::default().path("icons/chevron-left.svg"),
+                                        manager.language.text("Back"),
+                                        9.0,
+                                        if can_go_back { theme.soft_accent() } else { theme.faint_text },
+                                        false,
+                                        theme,
+                                        cx,
+                                    )
+                                        .w(px(25.0))
+                                        .h(px(24.0))
+                                .disabled(!can_go_back)
+                                .on_click(cx.listener(|manager, _, window, cx| {
+                                    manager.navigate_open_picker_history(-1, window, cx);
+                                })),
+                        )
+                        .child(
+                            crate::toolbar::toolbar_icon_button(
+                                "open-picker-forward",
+                                gpui::component::Icon::default().path("icons/chevron-right.svg"),
+                                manager.language.text("Forward"),
+                                9.0,
+                                if can_go_forward { theme.soft_accent() } else { theme.faint_text },
+                                false,
+                                theme,
+                                cx,
+                            )
+                                .w(px(25.0))
+                                .h(px(24.0))
+                                .disabled(!can_go_forward)
+                                .on_click(cx.listener(|manager, _, window, cx| {
+                                    manager.navigate_open_picker_history(1, window, cx);
+                                })),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("open-picker-path-bar")
+                        .debug_selector(|| "open-picker-path-bar".to_owned())
+                        .flex()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .h(px(26.0))
+                        .items_center()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(rgb(theme.border))
+                        .bg(rgb(theme.sidebar))
+                        .px_2()
+                        .child(
+                            Input::new(&picker.path_input)
+                                .id("open-picker-path-input")
+                                .small()
+                                .appearance(false)
+                                .flex_1()
+                                .min_w(px(0.0)),
+                        ),
+                )
+                .child(
+                    div()
+                    .id("open-picker-search")
+                        .debug_selector(|| "open-picker-search".to_owned())
+                        .w(px(190.0))
+                        .flex_shrink_0()
+                        .h(px(26.0))
+                        .items_center()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(rgb(theme.border))
+                        .bg(rgb(theme.sidebar))
+                        .px_2()
+                        .child(
+                            Input::new(&picker.search_input)
+                            .id("open-picker-search-input")
+                            .small()
+                            .w_full()
+                            .appearance(false)
+                            .prefix(crate::app_icon("search", 13.0, theme.muted_text)),
+                        ),
+                    ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_1()
+                .min_h(px(0.0))
+                .gap_0()
+                .child(places)
+                .child(table_area),
+        )
+}
+
+fn open_picker_footer(
+    manager: &ArchiveManager,
+    theme: Theme,
+    cx: &mut Context<ArchiveManager>,
+) -> impl IntoElement {
+    let picker = manager.file_actions.open_picker.as_ref().expect("Open picker is initialized");
+    let new_tab = picker.new_tab;
+    div()
+        .id("open-picker-footer")
+        .debug_selector(|| "open-picker-footer".to_owned())
+        .w_full()
+        .flex()
+        .items_center()
+        .justify_end()
+        .h(px(48.0))
+        .gap_2()
+        .px_2()
+        .bg(rgb(theme.sidebar))
+        .child(
+            Button::new("open-picker-cancel")
+                .debug_selector(|| "open-picker-cancel".to_owned())
+                .ghost()
+                .small()
+                .label(manager.language.text("Cancel"))
+                .on_click(cx.listener(|manager, _, window, cx| manager.close_modal(window, cx))),
+        )
+        .child(
+            Button::new("open-picker-confirm")
+                .debug_selector(|| "open-picker-confirm".to_owned())
+                .primary()
+                .small()
+                .label(manager.language.text(if new_tab {
+                    "Open in New Tab"
+                } else {
+                    "Open"
+                }))
+                .on_click(cx.listener(|manager, _, window, cx| {
+                    manager.confirm_open_picker(window, cx);
+                })),
+        )
 }
 
 /// Creates a navigation button for a Settings category.
@@ -640,19 +1169,22 @@ pub(crate) fn modal_view(
     cx: &mut Context<ArchiveManager>,
 ) -> gpui::component::dialog::Dialog {
     let language = manager.language;
-    let title = language.text(match modal {
-        Modal::Settings => "Settings",
-        Modal::About => "About",
-        Modal::CreateArchive => "Create archive",
-        Modal::CompareArchives => "Compare archives",
-        Modal::Recovery => "Archive Repair & Recovery",
-        Modal::Conversion => "Convert archive",
-        Modal::Info => "Info",
-        Modal::Password => "Archive password",
-        Modal::Delete => if manager.file_actions.pending_delete.as_ref().is_some_and(|target| target.archive_entry.is_some()) {
-            "Remove from archive"
-        } else { "Move to Trash" },
-    });
+    let title = (modal != Modal::OpenPicker).then(|| language.text(match modal {
+            Modal::OpenPicker => {
+                unreachable!("OpenPicker does not use a duplicate dialog title")
+            }
+            Modal::Settings => "Settings",
+            Modal::About => "About",
+            Modal::CreateArchive => "Create archive",
+            Modal::CompareArchives => "Compare archives",
+            Modal::Recovery => "Archive Repair & Recovery",
+            Modal::Conversion => "Convert archive",
+            Modal::Info => "Info",
+            Modal::Password => "Archive password",
+            Modal::Delete => if manager.file_actions.pending_delete.as_ref().is_some_and(|target| target.archive_entry.is_some()) {
+                "Remove from archive"
+            } else { "Move to Trash" },
+        }));
     let mut content = div()
         .flex()
         .flex_col()
@@ -661,6 +1193,9 @@ pub(crate) fn modal_view(
         .text_sm()
         .text_color(rgb(theme.text));
     match modal {
+        Modal::OpenPicker => {
+            content = content.p_0().gap_0().child(open_picker_view(manager, theme, window, cx));
+        }
         Modal::Delete => {
             content = content.child(file_actions::delete_view(manager, theme, cx));
         }
@@ -795,6 +1330,7 @@ pub(crate) fn modal_view(
 
     let view = cx.entity().downgrade();
     let footer = match modal {
+        Modal::OpenPicker => open_picker_footer(manager, theme, cx).into_any_element(),
         Modal::Password => password::footer(manager, cx).into_any_element(),
         Modal::CreateArchive => creation::footer(manager, cx).into_any_element(),
         Modal::Recovery => crate::recovery::footer(manager, cx).into_any_element(),
@@ -804,18 +1340,26 @@ pub(crate) fn modal_view(
         }
         _ => div().h(px(0.0)).into_any_element(),
     };
-    ui::center_dialog(dialog, title, footer)
+    ui::center_dialog(
+        dialog,
+        title,
+        footer,
+        if modal == Modal::OpenPicker { px(0.0) } else { px(16.0) },
+    )
         .width(px(match modal {
+            Modal::OpenPicker => 820.0,
             Modal::Settings => 620.0,
             Modal::CompareArchives => 900.0,
             Modal::Recovery => 800.0,
             Modal::Conversion => 760.0,
             _ => 460.0,
         }))
+        .when(modal == Modal::OpenPicker, |dialog| dialog.gap_y(px(0.0)))
         .overlay_closable(modal != Modal::Password)
         .when(modal == Modal::Password, |this| {
             this.width(px(blur::PASSWORD_WIDTH))
         })
+        .close_button(modal != Modal::OpenPicker)
         .on_close(cx.listener(|this, _, window, cx| this.close_modal(window, cx)))
         .on_ok(move |_, window, cx| {
             let _ = view.update(cx, |this, cx| match this.modal {
@@ -825,6 +1369,7 @@ pub(crate) fn modal_view(
                 Some(Modal::Conversion) => this.analyze_conversion(cx),
                 Some(Modal::CompareArchives) => this.start_archive_comparison(cx),
                 Some(Modal::Delete) => this.confirm_delete(window, cx),
+                Some(Modal::OpenPicker) => this.submit_open_picker(window, cx),
                 _ => {}
             });
             false

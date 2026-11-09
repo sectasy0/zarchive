@@ -126,6 +126,45 @@ mod archive_search_tests {
     }
 
     #[gpui::test]
+    fn backspace_removes_filter_badges_after_search_text_is_cleared(cx: &mut gpui::TestAppContext) {
+        use gpui::test::TestWindowExt;
+        let (view, cx) = crate::tests::component_window(cx, |_, cx| crate::tests::test_manager(cx));
+        cx.update(|window, cx| {
+            view.update(cx, |manager, cx| {
+                manager.set_search_query("annual ext:zip min:1MiB".into(), window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.click("toolbar-search-input", cx));
+        #[cfg(target_os = "macos")]
+        cx.simulate_keystrokes("cmd-a backspace");
+        #[cfg(not(target_os = "macos"))]
+        cx.simulate_keystrokes("ctrl-a backspace");
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert!(manager.toolbar_search.draft.is_empty());
+            assert_eq!(manager.toolbar_search.badges, ["ext:zip", "min:1MiB"]);
+        });
+
+        cx.simulate_keystrokes("backspace");
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert_eq!(manager.toolbar_search.query, "ext:zip ");
+            assert_eq!(manager.toolbar_search.badges, ["ext:zip"]);
+        });
+        cx.simulate_keystrokes("backspace");
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert!(manager.toolbar_search.query.is_empty());
+            assert!(manager.toolbar_search.badges.is_empty());
+            assert!(!manager.filters.criteria.is_active());
+        });
+    }
+
+    #[gpui::test]
     fn clear_search_button_resets_text_results_and_pending_scan(cx: &mut gpui::TestAppContext) {
         use gpui::test::TestWindowExt;
         let directory = tempfile::tempdir().unwrap();
@@ -253,6 +292,65 @@ mod archive_search_tests {
         assert_cleared(cx);
     }
 
+    #[gpui::test]
+    fn restores_directory_search_after_returning_from_archive(cx: &mut gpui::TestAppContext) {
+        use gpui::test::TestWindowExt;
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("browser");
+        std::fs::create_dir(&directory).unwrap();
+        let source = root.path().join("payload.txt");
+        std::fs::write(&source, b"archive search restore test").unwrap();
+        let archive_path = directory.join("bundle.zip");
+        crate::archive::create_zip(&archive_path, &[source]).unwrap();
+        let (view, cx) = crate::tests::component_window(cx, |_, cx| {
+            let mut manager = crate::tests::test_manager(cx);
+            manager.current_directory = Some(directory.clone());
+            manager.directory_history = vec![directory.clone()];
+            manager.navigation_history_index = 0;
+            manager.entries = crate::browser::read_directory(&directory).unwrap();
+            manager
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            view.update(cx, |manager, cx| {
+                manager.set_search_query("ext:zip".into(), window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert_eq!(manager.toolbar_search.query, "ext:zip");
+            assert_eq!(manager.filters.criteria.extensions, "zip");
+        });
+
+        view.update(cx, |manager, cx| {
+            manager.install_archive(
+                archive_path.clone(),
+                crate::archive::list_archive(&archive_path).unwrap(),
+                None,
+                cx,
+            );
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert!(manager.toolbar_search.query.is_empty());
+            assert!(!manager.filters.criteria.is_active());
+        });
+
+        view.update(cx, |manager, cx| manager.navigate_back(cx));
+        cx.update(|window, cx| window.render_frame(cx));
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert_eq!(manager.current_directory.as_ref(), Some(&directory));
+            assert_eq!(manager.toolbar_search.query, "ext:zip");
+            assert_eq!(manager.filters.criteria.extensions, "zip");
+            assert_eq!(manager.toolbar_search.input.as_ref().unwrap().read(cx).value(), "");
+        });
+    }
+
     #[test]
     fn directory_search_includes_files_inside_archives() {
         let directory = tempfile::tempdir().unwrap();
@@ -325,7 +423,8 @@ pub(crate) struct SearchField {
     input: Option<Entity<InputState>>,
     _subscription: Option<Subscription>,
     language: Option<Language>,
-    location: Option<(Option<PathBuf>, Option<PathBuf>, String, bool)>,
+    location: Option<SearchLocation>,
+    archive_return_search: Option<(PathBuf, SavedSearch)>,
     pub(crate) matches: std::collections::BTreeMap<String, ArchiveSearchMatch>,
     directory: Option<PathBuf>,
     searched_query: String,
@@ -333,6 +432,15 @@ pub(crate) struct SearchField {
     cancel: Arc<AtomicBool>,
     revision: u64,
     task: Option<u64>,
+}
+
+type SearchLocation = (Option<PathBuf>, Option<PathBuf>, String, bool);
+
+#[derive(Clone, Default)]
+struct SavedSearch {
+    query: String,
+    draft: String,
+    badges: Vec<String>,
 }
 
 impl SearchField {
@@ -385,6 +493,18 @@ impl ArchiveManager {
         let query = crate::filters::compose_search(&badges, &draft);
         self.set_search_query_mode(query, false, window, cx);
         window.focus(&self.toolbar_search.focus_handle(cx), cx);
+    }
+
+    fn search_key_down(&mut self, event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if event.keystroke.key == "backspace"
+            && self.toolbar_search.draft.is_empty()
+            && !self.toolbar_search.badges.is_empty()
+        {
+            self.remove_search_badge(self.toolbar_search.badges.len() - 1, false, window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        crate::filters::search_key_down(self, event, window, cx);
     }
 
     fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -525,19 +645,50 @@ pub(crate) fn prepare_search(
     window: &mut Window,
     cx: &mut Context<ArchiveManager>,
 ) {
-    let location = (
+    let location: SearchLocation = (
         manager.current_directory.clone(),
         manager.archive_path.clone(),
         manager.selected_folder.clone(),
         manager.show_favorites,
     );
-    if manager.toolbar_search.location.as_ref().is_some_and(|previous| previous != &location) {
-        manager.toolbar_search.query.clear();
-        manager.toolbar_search.draft.clear();
-        manager.toolbar_search.badges.clear();
+    if let Some(previous) = manager
+        .toolbar_search
+        .location
+        .clone()
+        .filter(|previous| previous != &location)
+    {
+        let restore = if previous.1.is_none() && location.1.is_some() {
+            if let Some(directory) = previous.0 {
+                let search_to_save = SavedSearch {
+                    query: manager.toolbar_search.query.clone(),
+                    draft: manager.toolbar_search.draft.clone(),
+                    badges: manager.toolbar_search.badges.clone(),
+                };
+                manager.toolbar_search.archive_return_search = Some((directory, search_to_save));
+            }
+            None
+        } else if previous.1.is_some() && location.1.is_none() {
+            location.0.as_ref().and_then(|directory| {
+                manager
+                    .toolbar_search
+                    .archive_return_search
+                    .take()
+                    .filter(|(path, _)| path == directory)
+                    .map(|(_, search)| search)
+            })
+        } else {
+            None
+        };
         manager.filters.visible = false;
-        if let Some(input) = manager.toolbar_search.input.clone() {
-            input.update(cx, |state, cx| state.set_value("", window, cx));
+        if let Some(search) = restore {
+            manager.set_search_query_mode(search.query, false, window, cx);
+            manager.toolbar_search.draft = search.draft.clone();
+            manager.toolbar_search.badges = search.badges;
+            if let Some(input) = manager.toolbar_search.input.clone() {
+                input.update(cx, |state, cx| state.set_value(search.draft, window, cx));
+            }
+        } else if !manager.toolbar_search.query.is_empty() {
+            manager.set_search_query_mode(String::new(), false, window, cx);
         }
     }
     manager.toolbar_search.location = Some(location);
@@ -702,7 +853,7 @@ fn dropdown_button(
 }
 
 /// Builds a compact icon-only toolbar button with an accessible label.
-fn toolbar_icon_button(
+pub(crate) fn toolbar_icon_button(
     id: &'static str,
     icon: gpui::component::Icon,
     label: &'static str,
@@ -808,7 +959,7 @@ fn search_input(manager: &ArchiveManager, theme: Theme, cx: &mut Context<Archive
     div()
         .id("toolbar-search")
         .debug_selector(|| "toolbar-search".to_owned())
-        .on_key_down(cx.listener(crate::filters::search_key_down))
+        .on_key_down(cx.listener(ArchiveManager::search_key_down))
         .flex()
         .flex_1()
         .min_w(px(160.0))
@@ -958,20 +1109,22 @@ pub(crate) fn toolbox_bar(
             )
             .dropdown_menu(move |menu, _, _| {
                 let open_view = files_view.clone();
+                let open_new_tab_view = files_view.clone();
                 let create_view = files_view.clone();
                 let conversion_view = files_view.clone();
-                menu.min_w(px(220.0))
-                    .item(
-                        PopupMenuItem::new(language.text("Open archive..."))
-                            .icon(spaced_icon(
-                                gpui::component::Icon::default().path("icons/folder-open.svg"),
-                            ))
-                            .action(Box::new(key_actions::OpenFile))
-                            .on_click(move |_, _, cx| {
-                                let _ = open_view.update(cx, |this, cx| this.open_file(cx));
-                            }),
-                    )
-                    .separator()
+                let menu = menu.min_w(px(220.0))
+                    .item(PopupMenuItem::new(language.text("Open..."))
+                        .icon(spaced_icon(gpui::component::Icon::default().path("icons/folder-open.svg")))
+                        .action(Box::new(key_actions::OpenFile))
+                        .on_click(move |_, window, cx| {
+                            let _ = open_view.update(cx, |this, cx| this.open_file(window, cx));
+                        }))
+                    .item(PopupMenuItem::new(language.text("Open in New Tab..."))
+                        .icon(spaced_icon(gpui::assets::IconName::ExternalLink))
+                        .on_click(move |_, window, cx| {
+                            let _ = open_new_tab_view.update(cx, |this, cx| this.open_file_in_new_tab(window, cx));
+                        }));
+                menu.separator()
                     .item(
                         PopupMenuItem::new(language.text("New archive..."))
                             .icon(spaced_icon(

@@ -5,13 +5,15 @@ use gpui::assets::IconName;
 use gpui::component::{
     Icon, Sizable,
     button::{Button, ButtonVariants},
+    input::{InputEvent, InputState},
     menu::{PopupMenu, PopupMenuItem},
 };
 use gpui::{
-    App, ClipboardItem, Context, IntoElement, TestSupportExt, WeakEntity, Window, div, prelude::*,
+    App, ClipboardItem, Context, Entity, Focusable, IntoElement, Subscription, TestSupportExt,
+    WeakEntity, Window, div, prelude::*,
     px, rgb,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Default)]
 /// Stores background operations and pending state for file-context actions.
@@ -24,6 +26,21 @@ pub struct FileActions {
     pub delete_task: Option<u64>,
     /// Filesystem item or archive entry shown in the Info dialog.
     pub info_target: Option<EntryTarget>,
+    /// Current path and selection shown in the Open picker.
+    pub open_picker: Option<OpenPicker>,
+}
+
+pub(crate) struct OpenPicker {
+    pub(crate) directory: PathBuf,
+    pub(crate) entries: Vec<archive::ArchiveEntry>,
+    pub(crate) selected: Option<PathBuf>,
+    pub(crate) new_tab: bool,
+    pub(crate) history: Vec<PathBuf>,
+    pub(crate) history_index: usize,
+    pub(crate) scroll: gpui::UniformListScrollHandle,
+    pub(crate) path_input: Entity<InputState>,
+    pub(crate) search_input: Entity<InputState>,
+    _search_subscription: Subscription,
 }
 
 #[derive(Clone)]
@@ -47,6 +64,7 @@ pub struct EntryTarget {
 /// Identifies an operation offered by an entry's context menu.
 pub enum EntryAction {
     Open,
+    OpenInNewTab,
     CreateArchive,
     Extract,
     ExtractArchive,
@@ -66,6 +84,7 @@ impl EntryAction {
     fn label(self) -> &'static str {
         match self {
             Self::Open => "Open",
+            Self::OpenInNewTab => "Open in new tab",
             Self::CreateArchive => "Create archive",
             Self::Extract => "Extract file",
             Self::ExtractArchive => "Extract archive to...",
@@ -85,6 +104,7 @@ impl EntryAction {
     fn icon(self, _is_directory: bool) -> Icon {
         match self {
             Self::Open => Icon::default().path("icons/folder-open.svg"),
+            Self::OpenInNewTab => IconName::ExternalLink.into(),
             Self::CreateArchive => Icon::default().path("icons/plus.svg"),
             Self::Extract => IconName::Download.into(),
             Self::ExtractArchive => IconName::FolderOutput.into(),
@@ -104,7 +124,12 @@ impl EntryAction {
 impl EntryTarget {
     /// Lists only the actions valid for this filesystem or archive target.
     pub fn actions(&self) -> Vec<EntryAction> {
-        let mut actions = vec![EntryAction::Open, EntryAction::CopyPath, EntryAction::Info];
+        let mut actions = vec![
+            EntryAction::Open,
+            EntryAction::OpenInNewTab,
+            EntryAction::CopyPath,
+            EntryAction::Info,
+        ];
         if !self.is_directory {
             actions.push(EntryAction::Inspect);
         }
@@ -143,6 +168,182 @@ impl EntryTarget {
             archive::extract_entry(&self.path, entry)
         }
     }
+}
+
+impl ArchiveManager {
+    pub(crate) fn show_open_picker(
+        &mut self,
+        new_tab: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let directory = self
+            .current_directory
+            .clone()
+            .or_else(|| self.archive_path.as_deref().and_then(std::path::Path::parent).map(Path::to_path_buf))
+            .or_else(|| self.default_location.clone())
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let Ok(entries) = crate::read_directory(&directory) else {
+            self.status_message = Some(format!("{}: {}", self.language.text("Unable to open folder"), directory.display()));
+            cx.notify();
+            return;
+        };
+        let path_value = directory.display().to_string();
+        let path_input = cx.new(|cx| InputState::new(window, cx).default_value(path_value));
+        let search_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(self.language.text("Search files and folders"))
+        });
+        let search_subscription = cx.subscribe_in(&search_input, window, |_, _, event, _, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
+        self.file_actions.open_picker = Some(OpenPicker {
+            directory: directory.clone(),
+            entries,
+            selected: None,
+            new_tab,
+            history: vec![directory.clone()],
+            history_index: 0,
+            scroll: gpui::UniformListScrollHandle::new(),
+            path_input,
+            search_input,
+            _search_subscription: search_subscription,
+        });
+        self.show_modal(Modal::OpenPicker, window, cx);
+    }
+
+    pub(crate) fn load_open_picker_directory(
+        &mut self,
+        directory: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match crate::read_directory(&directory) {
+            Ok(entries) => {
+                let path_value = directory.display().to_string();
+                let Some(picker) = self.file_actions.open_picker.as_ref() else { return; };
+                if picker.directory == directory {
+                    return;
+                }
+                let history_index = picker.history_index;
+                let path_input = picker.path_input.clone();
+                path_input.update(cx, |state, cx| state.set_value(path_value, window, cx));
+                if let Some(picker) = &mut self.file_actions.open_picker {
+                    picker.history.truncate(history_index + 1);
+                    if picker.history.last() != Some(&directory) {
+                        picker.history.push(directory.clone());
+                    }
+                    picker.history_index = picker.history.len().saturating_sub(1);
+                    picker.directory = directory;
+                    picker.entries = entries;
+                    picker.selected = None;
+                    picker.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+                }
+                cx.notify();
+            }
+            Err(error) => {
+                self.status_message = Some(format!("{}: {error:#}", self.language.text("Unable to open folder")));
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn navigate_open_picker_history(
+        &mut self,
+        offset: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(picker) = self.file_actions.open_picker.as_ref() else { return; };
+        let target_index = picker.history_index.saturating_add_signed(offset);
+        let Some(directory) = picker.history.get(target_index).cloned() else { return; };
+        let Ok(entries) = crate::read_directory(&directory) else { return; };
+        let path_input = picker.path_input.clone();
+        path_input.update(cx, |state, cx| state.set_value(directory.display().to_string(), window, cx));
+        if let Some(picker) = &mut self.file_actions.open_picker {
+            picker.history_index = target_index;
+            picker.directory = directory;
+            picker.entries = entries;
+            picker.selected = None;
+            picker.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn select_open_picker_entry(
+        &mut self,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(picker) = &mut self.file_actions.open_picker {
+            picker.selected = Some(path);
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn submit_open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(picker) = &self.file_actions.open_picker else { return; };
+        if picker.path_input.focus_handle(cx).is_focused(window) {
+            let path = PathBuf::from(picker.path_input.read(cx).value().trim());
+            if path.is_dir() {
+                self.load_open_picker_directory(path, window, cx);
+            } else if path.is_file() {
+                self.finish_open_picker(path, window, cx);
+            } else {
+                self.status_message = Some(format!("{}: {}", self.language.text("Location does not exist"), path.display()));
+                cx.notify();
+            }
+            return;
+        }
+        self.confirm_open_picker(window, cx);
+    }
+
+    pub(crate) fn activate_open_picker_entry(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if path.is_dir() {
+            self.load_open_picker_directory(path, window, cx);
+        } else {
+            self.finish_open_picker(path, window, cx);
+        }
+    }
+
+    pub(crate) fn confirm_open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(picker) = self.file_actions.open_picker.as_ref() else { return; };
+        let path = picker.selected.clone().unwrap_or_else(|| picker.directory.clone());
+        if !path.is_file() && !path.is_dir() {
+            self.status_message = Some(format!("{}: {}", self.language.text("Location does not exist"), path.display()));
+            cx.notify();
+            return;
+        }
+        self.finish_open_picker(path, window, cx);
+    }
+
+    fn finish_open_picker(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let new_tab = self.file_actions.open_picker.as_ref().is_some_and(|picker| picker.new_tab);
+        self.close_modal(window, cx);
+        let target = EntryTarget {
+            name: path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned(),
+            key: path.to_string_lossy().into_owned(),
+            is_directory: path.is_dir(),
+            path,
+            archive_entry: None,
+            password: None,
+        };
+        if new_tab {
+            self.open_entry_in_new_tab(&target, cx);
+        } else if target.is_directory {
+            self.navigate_to(target.path, cx);
+        } else {
+            self.open_entry(&target, cx);
+        }
+    }
+
 }
 
 impl ArchiveManager {
@@ -568,7 +769,7 @@ fn context_menu_groups(target: &EntryTarget) -> Vec<Vec<EntryAction>> {
     use EntryAction::*;
     let available = target.actions();
     let groups: &[&[EntryAction]] = &[
-        &[Open],
+        &[Open, OpenInNewTab],
         &[CreateArchive, ExtractHere, ExtractArchive, ConvertArchive, Extract],
         &[Inspect, TestIntegrity, Audit],
         &[CopyPath, MoveTo],
@@ -633,6 +834,7 @@ pub fn menu(
                 .on_click(move |_, window, cx| {
                     let _ = view.update(cx, |this, cx| match action {
                         EntryAction::Open => this.open_entry(&target, cx),
+                        EntryAction::OpenInNewTab => this.open_entry_in_new_tab(&target, cx),
                         EntryAction::CopyPath => this.copy_entry_path(&target, cx),
                         EntryAction::Info => {
                             this.file_actions.info_target = Some(target.clone());
@@ -843,7 +1045,7 @@ mod tests {
             archive_entry: None, password: None, is_directory: false,
         };
         assert_eq!(context_menu_groups(&target), vec![
-            vec![Open],
+            vec![Open, OpenInNewTab],
             vec![CreateArchive, ExtractHere, ExtractArchive, ConvertArchive],
             vec![Inspect, TestIntegrity, Audit],
             vec![CopyPath, MoveTo],
@@ -851,17 +1053,17 @@ mod tests {
         ]);
         target.path = "notes.txt".into();
         assert_eq!(context_menu_groups(&target), vec![
-            vec![Open], vec![CreateArchive], vec![Inspect], vec![CopyPath, MoveTo], vec![Info, Trash],
+            vec![Open, OpenInNewTab], vec![CreateArchive], vec![Inspect], vec![CopyPath, MoveTo], vec![Info, Trash],
         ]);
         target.is_directory = true;
         assert_eq!(context_menu_groups(&target), vec![
-            vec![Open], vec![CreateArchive], vec![CopyPath, MoveTo], vec![Info, Trash],
+            vec![Open, OpenInNewTab], vec![CreateArchive], vec![CopyPath, MoveTo], vec![Info, Trash],
         ]);
         target.archive_entry = Some("folder".into());
-        assert_eq!(context_menu_groups(&target), vec![vec![Open], vec![CopyPath], vec![Info]]);
+        assert_eq!(context_menu_groups(&target), vec![vec![Open, OpenInNewTab], vec![CopyPath], vec![Info]]);
         target.is_directory = false;
         target.archive_entry = Some("notes.txt".into());
-        assert_eq!(context_menu_groups(&target), vec![vec![Open], vec![Extract], vec![Inspect], vec![CopyPath], vec![Info]]);
+        assert_eq!(context_menu_groups(&target), vec![vec![Open, OpenInNewTab], vec![Extract], vec![Inspect], vec![CopyPath], vec![Info]]);
         let grouped: Vec<_> = context_menu_groups(&target).into_iter().flatten().collect();
         assert_eq!(grouped.len(), target.actions().len());
         assert!(target.actions().iter().all(|action| grouped.contains(action)));
@@ -1095,6 +1297,7 @@ mod tests {
             target.actions(),
             [
                 EntryAction::Open,
+                EntryAction::OpenInNewTab,
                 EntryAction::CopyPath,
                 EntryAction::Info,
                 EntryAction::Inspect,
@@ -1104,15 +1307,19 @@ mod tests {
         target.is_directory = true;
         assert_eq!(
             target.actions(),
-            [EntryAction::Open, EntryAction::CopyPath, EntryAction::Info]
+            [EntryAction::Open, EntryAction::OpenInNewTab, EntryAction::CopyPath, EntryAction::Info]
         );
         target.archive_entry = None;
+        target.is_directory = false;
+        target.path = PathBuf::from("notes.txt");
         assert_eq!(
             target.actions(),
             [
                 EntryAction::Open,
+                EntryAction::OpenInNewTab,
                 EntryAction::CopyPath,
                 EntryAction::Info,
+                EntryAction::Inspect,
                 EntryAction::CreateArchive,
                 EntryAction::MoveTo,
                 EntryAction::Trash

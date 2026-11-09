@@ -416,9 +416,9 @@ impl Render for ArchiveManager {
                 }
             }))
             .on_action(
-                cx.listener(|this, _: &toolbar::key_actions::OpenFile, _, cx| {
+                cx.listener(|this, _: &toolbar::key_actions::OpenFile, window, cx| {
                     if this.modal.is_none() {
-                        this.open_file(cx);
+                        this.open_file(window, cx);
                     }
                 }),
             )
@@ -644,12 +644,17 @@ impl Render for ArchiveManager {
                             .min_w(px(0.0))
                             .bg(rgb(theme.surface))
                             .child(
-                                div()
-                                    .id("browser-split")
-                                    .flex()
-                                    .flex_1()
-                                    .min_h(px(0.0))
-                                    .children(browser_panels),
+                                gpui::component::resizable::h_resizable("browser-split")
+                                    .child(
+                                        gpui::component::resizable::resizable_panel()
+                                            .size_range(px(130.0)..gpui::Pixels::MAX)
+                                            .child(browser_panels.remove(0)),
+                                    )
+                                    .child(
+                                        gpui::component::resizable::resizable_panel()
+                                            .size_range(px(130.0)..gpui::Pixels::MAX)
+                                            .child(browser_panels.remove(0)),
+                                    ),
                             )
                             .when(self.inspector.visible, |this| {
                                 let height =
@@ -1863,13 +1868,12 @@ fn sort_header(
                                 return;
                             }
                             let _ = view.update(cx, |manager, cx| {
-                                if let Some(pane) = manager.browsers.get_mut(pane_index) {
-                                    if let Some(tab) = pane.tabs.get_mut(pane.active_tab) {
-                                        tab.visible_columns[column_index] =
-                                            !tab.visible_columns[column_index];
-                                        cx.notify();
-                                    }
-                                }
+                                manager.set_browser_column_visibility(
+                                    pane_index,
+                                    column,
+                                    !visible_columns[column_index],
+                                    cx,
+                                );
                             });
                         }),
                 );
@@ -2344,7 +2348,9 @@ pub(crate) fn file_icon(extension: &str) -> &'static str {
         "xls" | "xlsx" | "xlsm" | "xlsb" | "xlt" | "xltx" | "xltm" | "ods" | "ots"
         | "fods" | "numbers" | "tsv" => "file-spreadsheet",
         "ppt" | "pptx" | "odp" => "document",
-        "bin" | "dat" | "exe" | "dll" | "so" | "dylib" | "class" | "o" | "obj" | "wasm" | "db"
+        "exe" | "com" | "bat" | "cmd" | "msi" | "msp" | "ps1" | "sh" | "bash" | "zsh" | "fish"
+        | "run" | "appimage" | "command" => "executable",
+        "bin" | "dat" | "dll" | "so" | "dylib" | "class" | "o" | "obj" | "wasm" | "db"
         | "sqlite" | "sqlite3" | "iso" => "binary",
         _ => "file",
     }
@@ -2380,8 +2386,8 @@ pub(crate) fn app_icon(name: &str, size: f32, color: u32) -> impl IntoElement {
 /// Returns the width-to-height ratio used to preserve an icon's source proportions.
 pub(crate) fn icon_aspect_ratio(name: &str) -> f32 {
     match name {
-        "document" | "image" | "audio" | "video" | "code" | "file"
-        | "archive" | "archive-locked" => 0.75,
+        "document" | "image" | "audio" | "video" | "code" | "file" | "executable" | "archive"
+        | "archive-locked" => 0.75,
         "documents" => 0.875,
         "file-spreadsheet" => 238.0 / 320.0,
         "csv" => 547.8 / 548.0,

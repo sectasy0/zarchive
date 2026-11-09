@@ -474,14 +474,15 @@ pub fn select(manager: &ArchiveManager, selector: Selector) -> impl IntoElement 
 /// Centers a dialog using measured title/footer geometry cached for the current modal.
 pub fn center_dialog(
     dialog: gpui::component::dialog::Dialog,
-    title: &'static str,
+    title: Option<&'static str>,
     footer: gpui::AnyElement,
+    padding: gpui::Pixels,
 ) -> gpui::component::dialog::Dialog {
     dialog
-        .p(gpui::px(16.0))
+        .p(padding)
         .entrance(gpui::component::dialog::DialogEntrance::Fade)
         .centered()
-        .title(title)
+        .when_some(title, |dialog, title| dialog.title(title))
         .footer(footer)
 }
 

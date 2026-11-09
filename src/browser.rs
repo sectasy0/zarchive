@@ -95,6 +95,36 @@ pub(crate) enum SortColumn {
     Modified,
 }
 
+impl SortColumn {
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Type => "type",
+            Self::Size => "size",
+            Self::Modified => "modified",
+        }
+    }
+
+    pub(crate) fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "name" => Some(Self::Name),
+            "type" => Some(Self::Type),
+            "size" => Some(Self::Size),
+            "modified" => Some(Self::Modified),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::Name => 0,
+            Self::Type => 1,
+            Self::Size => 2,
+            Self::Modified => 3,
+        }
+    }
+}
+
 /// Builds a sorted list of unique archive folders with their display depths.
 pub(crate) fn folder_tree(entries: &[ArchiveEntry]) -> Vec<(String, String, usize)> {
     let mut folders = BTreeSet::new();

@@ -603,7 +603,8 @@ mod tests {
             manager
         });
         for (trigger, item) in [
-            ("toolbar-files-dropdown", "Open archive..."),
+            ("toolbar-files-dropdown", "Open..."),
+            ("toolbar-files-dropdown", "Open in New Tab..."),
             ("toolbar-files-dropdown", "New archive..."),
             ("toolbar-extract-dropdown", "Extract here"),
             ("toolbar-extract-dropdown", "Extract to..."),

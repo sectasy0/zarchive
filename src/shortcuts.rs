@@ -51,7 +51,7 @@ impl Command {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::Open => "Open archive...",
+            Self::Open => "Open...",
             Self::Create => "New archive...",
             Self::ExtractHere => "Extract here",
             Self::ExtractTo => "Extract to...",
