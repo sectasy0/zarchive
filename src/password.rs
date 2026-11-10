@@ -13,6 +13,8 @@ use gpui::{App, Context, IntoElement, Window, div, prelude::*, px, rgb};
 use std::{path::PathBuf, sync::{Arc, atomic::{AtomicBool, Ordering}}};
 use zeroize::Zeroizing;
 
+pub(crate) const PASSWORD_WIDTH: f32 = 420.0;
+
 /// Shared, zeroizing password retained for the lifetime of an unlocked archive.
 pub type ArchivePassword = Arc<Zeroizing<String>>;
 
@@ -128,7 +130,6 @@ impl ArchiveManager {
                         }
                         this.password_prompt.clear();
                         this.modal = None;
-                        this.password_blur.clear();
                     }
                     Err(crate::task_queue::TaskFailure::Cancelled) => {},
                     Err(crate::task_queue::TaskFailure::Failed(_)) => {

@@ -249,28 +249,34 @@ pub(crate) fn search_archive_entries(
 
 /// Sorts entries while keeping directories ahead of files in either direction.
 pub(crate) fn sort_entries(entries: &mut [ArchiveEntry], column: SortColumn, ascending: bool) {
-    entries.sort_by(|left, right| {
-        let directory_order = right.is_directory.cmp(&left.is_directory);
-        let order = if directory_order != std::cmp::Ordering::Equal {
-            directory_order
-        } else {
-            let order = match column {
-                SortColumn::Name => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
-                SortColumn::Type => sortable_type(left).cmp(&sortable_type(right)),
-                SortColumn::Size => left.size.cmp(&right.size),
-                SortColumn::Modified => left.modified.cmp(&right.modified),
-            };
-            if order == std::cmp::Ordering::Equal {
-                left.name.to_lowercase().cmp(&right.name.to_lowercase())
+    #[derive(PartialEq, Eq, PartialOrd, Ord)]
+    enum SortValue {
+        Text(String),
+        Size(u64),
+        Modified(Option<chrono::NaiveDate>),
+    }
+    #[derive(PartialEq, Eq, PartialOrd, Ord)]
+    enum DirectedSortValue {
+        Ascending(SortValue),
+        Descending(std::cmp::Reverse<SortValue>),
+    }
+
+    entries.sort_by_cached_key(|entry| {
+        let value = match column {
+            SortColumn::Name => SortValue::Text(entry.name.to_lowercase()),
+            SortColumn::Type => SortValue::Text(sortable_type(entry)),
+            SortColumn::Size => SortValue::Size(entry.size),
+            SortColumn::Modified => SortValue::Modified(entry.modified),
+        };
+        let name = SortValue::Text(entry.name.to_lowercase());
+        let direct = |value| {
+            if ascending {
+                DirectedSortValue::Ascending(value)
             } else {
-                order
+                DirectedSortValue::Descending(std::cmp::Reverse(value))
             }
         };
-        if ascending || directory_order != std::cmp::Ordering::Equal {
-            order
-        } else {
-            order.reverse()
-        }
+        (!entry.is_directory, direct(value), direct(name))
     });
 }
 
@@ -365,6 +371,18 @@ pub(crate) fn directory_size_with_cancel(
 
 /// Reads one filesystem directory into the common archive-entry representation.
 pub(crate) fn read_directory(path: &Path) -> anyhow::Result<Vec<ArchiveEntry>> {
+    read_directory_with_password_metadata(path, true)
+}
+
+/// Reads picker entries without opening archives just to detect password protection.
+pub(crate) fn read_picker_directory(path: &Path) -> anyhow::Result<Vec<ArchiveEntry>> {
+    read_directory_with_password_metadata(path, false)
+}
+
+fn read_directory_with_password_metadata(
+    path: &Path,
+    inspect_passwords: bool,
+) -> anyhow::Result<Vec<ArchiveEntry>> {
     let directory = std::fs::read_dir(path)
         .with_context(|| format!("Failed to read directory: {}", path.display()))?;
     let mut entries = Vec::new();
@@ -384,7 +402,9 @@ pub(crate) fn read_directory(path: &Path) -> anyhow::Result<Vec<ArchiveEntry>> {
             modified: metadata.modified().ok()
                 .map(|time| chrono::DateTime::<chrono::Local>::from(time).date_naive()),
             is_directory,
-            is_encrypted: !is_directory && crate::archive::is_password_protected(&entry_path),
+            is_encrypted: inspect_passwords
+                && !is_directory
+                && crate::archive::is_password_protected(&entry_path),
         });
     }
 

@@ -268,7 +268,7 @@ impl ArchiveManager {
                         password.as_deref(),
                     )?;
                 } else {
-                    let format = crate::archive::ResolvedFormat::from_path(&worker_target.path);
+                    let format = crate::archive::ResolvedFormat::from_file(&worker_target.path);
                     anyhow::ensure!(
                         !format.is_some_and(|format| format.is_single_compressed()),
                         "Editing standalone compressed streams is not supported"
@@ -385,7 +385,7 @@ impl Preview {
         } else {
             std::fs::metadata(&self.target.path)
                 .is_ok_and(|metadata| metadata.is_file() && !metadata.permissions().readonly())
-                && !crate::archive::ResolvedFormat::from_path(&self.target.path)
+                && !crate::archive::ResolvedFormat::from_file(&self.target.path)
                     .is_some_and(|format| format.is_single_compressed())
         }
     }

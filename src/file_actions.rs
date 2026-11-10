@@ -13,7 +13,10 @@ use gpui::{
     WeakEntity, Window, div, prelude::*,
     px, rgb,
 };
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 #[derive(Default)]
 /// Stores background operations and pending state for file-context actions.
@@ -32,7 +35,9 @@ pub struct FileActions {
 
 pub(crate) struct OpenPicker {
     pub(crate) directory: PathBuf,
-    pub(crate) entries: Vec<archive::ArchiveEntry>,
+    pub(crate) entries: Arc<Vec<archive::ArchiveEntry>>,
+    pub(crate) matching_indices: Arc<Vec<usize>>,
+    pub(crate) loading: bool,
     pub(crate) selected: Option<PathBuf>,
     pub(crate) new_tab: bool,
     pub(crate) history: Vec<PathBuf>,
@@ -41,6 +46,19 @@ pub(crate) struct OpenPicker {
     pub(crate) path_input: Entity<InputState>,
     pub(crate) search_input: Entity<InputState>,
     _search_subscription: Subscription,
+}
+
+fn matching_picker_indices(entries: &[archive::ArchiveEntry], query: &str) -> Arc<Vec<usize>> {
+    let query = query.trim().to_lowercase();
+    Arc::new(
+        entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                (query.is_empty() || entry.name.to_lowercase().contains(&query)).then_some(index)
+            })
+            .collect(),
+    )
 }
 
 #[derive(Clone)]
@@ -184,24 +202,27 @@ impl ArchiveManager {
             .or_else(|| self.default_location.clone())
             .or_else(dirs::home_dir)
             .unwrap_or_else(|| PathBuf::from("."));
-        let Ok(entries) = crate::read_directory(&directory) else {
-            self.status_message = Some(format!("{}: {}", self.language.text("Unable to open folder"), directory.display()));
-            cx.notify();
-            return;
-        };
         let path_value = directory.display().to_string();
         let path_input = cx.new(|cx| InputState::new(window, cx).default_value(path_value));
         let search_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder(self.language.text("Search files and folders"))
         });
-        let search_subscription = cx.subscribe_in(&search_input, window, |_, _, event, _, cx| {
+        let search_subscription = cx.subscribe_in(&search_input, window, |manager, state, event, _, cx| {
             if matches!(event, InputEvent::Change) {
+                if let Some(picker) = manager.file_actions.open_picker.as_mut() {
+                    picker.matching_indices = matching_picker_indices(
+                        &picker.entries,
+                        state.read(cx).value().as_ref(),
+                    );
+                }
                 cx.notify();
             }
         });
         self.file_actions.open_picker = Some(OpenPicker {
             directory: directory.clone(),
-            entries,
+            entries: Arc::new(Vec::new()),
+            matching_indices: Arc::new(Vec::new()),
+            loading: true,
             selected: None,
             new_tab,
             history: vec![directory.clone()],
@@ -212,6 +233,68 @@ impl ArchiveManager {
             _search_subscription: search_subscription,
         });
         self.show_modal(Modal::OpenPicker, window, cx);
+        let worker_directory = directory.clone();
+        let worker = cx.background_executor().spawn(async move {
+            let mut entries = crate::browser::read_picker_directory(&worker_directory)?;
+            crate::sort_entries(&mut entries, crate::SortColumn::Name, true);
+            Ok(entries)
+        });
+        let view = cx.entity().downgrade();
+        let executor = cx.background_executor().clone();
+        window
+            .spawn(cx, async move |async_cx| {
+                let mut result = Some(worker.await);
+                loop {
+                    let delivered = async_cx.update(|window, cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            let Some(result) = result.take() else { return; };
+                            this.finish_open_picker_load(&directory, result, window, cx);
+                        });
+                    });
+                    match delivered {
+                        Ok(()) => break,
+                        Err(error) if error.is::<std::cell::BorrowMutError>() => {
+                            executor.timer(std::time::Duration::from_millis(16)).await;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            })
+            .detach();
+    }
+
+    fn finish_open_picker_load(
+        &mut self,
+        directory: &Path,
+        result: anyhow::Result<Vec<archive::ArchiveEntry>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(picker) = self.file_actions.open_picker.as_mut() else {
+            return;
+        };
+        if self.modal != Some(Modal::OpenPicker) || picker.directory != directory {
+            return;
+        }
+        match result {
+            Ok(entries) => {
+                let query = picker.search_input.read(cx).value().to_string();
+                picker.matching_indices = matching_picker_indices(&entries, &query);
+                picker.entries = Arc::new(entries);
+                picker.loading = false;
+                cx.notify();
+            }
+            Err(_) => {
+                self.file_actions.open_picker = None;
+                self.close_modal(window, cx);
+                self.status_message = Some(format!(
+                    "{}: {}",
+                    self.language.text("Unable to open folder"),
+                    directory.display()
+                ));
+                cx.notify();
+            }
+        }
     }
 
     pub(crate) fn load_open_picker_directory(
@@ -220,15 +303,19 @@ impl ArchiveManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match crate::read_directory(&directory) {
-            Ok(entries) => {
+        match crate::browser::read_picker_directory(&directory) {
+            Ok(mut entries) => {
+                crate::sort_entries(&mut entries, crate::SortColumn::Name, true);
                 let path_value = directory.display().to_string();
-                let Some(picker) = self.file_actions.open_picker.as_ref() else { return; };
+                let Some(picker) = self.file_actions.open_picker.as_ref() else {
+                    return;
+                };
                 if picker.directory == directory {
                     return;
                 }
                 let history_index = picker.history_index;
                 let path_input = picker.path_input.clone();
+                let search_query = picker.search_input.read(cx).value().to_string();
                 path_input.update(cx, |state, cx| state.set_value(path_value, window, cx));
                 if let Some(picker) = &mut self.file_actions.open_picker {
                     picker.history.truncate(history_index + 1);
@@ -237,7 +324,9 @@ impl ArchiveManager {
                     }
                     picker.history_index = picker.history.len().saturating_sub(1);
                     picker.directory = directory;
-                    picker.entries = entries;
+                    picker.matching_indices = matching_picker_indices(&entries, &search_query);
+                    picker.entries = Arc::new(entries);
+                    picker.loading = false;
                     picker.selected = None;
                     picker.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
                 }
@@ -256,16 +345,22 @@ impl ArchiveManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(picker) = self.file_actions.open_picker.as_ref() else { return; };
+        let Some(picker) = self.file_actions.open_picker.as_ref() else {
+            return;
+        };
         let target_index = picker.history_index.saturating_add_signed(offset);
         let Some(directory) = picker.history.get(target_index).cloned() else { return; };
-        let Ok(entries) = crate::read_directory(&directory) else { return; };
+        let search_query = picker.search_input.read(cx).value().to_string();
         let path_input = picker.path_input.clone();
+        let Ok(mut entries) = crate::browser::read_picker_directory(&directory) else { return; };
+        crate::sort_entries(&mut entries, crate::SortColumn::Name, true);
         path_input.update(cx, |state, cx| state.set_value(directory.display().to_string(), window, cx));
         if let Some(picker) = &mut self.file_actions.open_picker {
             picker.history_index = target_index;
             picker.directory = directory;
-            picker.entries = entries;
+            picker.matching_indices = matching_picker_indices(&entries, &search_query);
+            picker.entries = Arc::new(entries);
+            picker.loading = false;
             picker.selected = None;
             picker.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
         }
@@ -1040,8 +1135,11 @@ mod tests {
     #[test]
     fn context_actions_are_grouped_without_changing_available_operations() {
         use EntryAction::*;
+        let directory = tempfile::tempdir().unwrap();
+        let archive_path = directory.path().join("archive.zip");
+        std::fs::write(&archive_path, b"PK\x03\x04").unwrap();
         let mut target = EntryTarget {
-            name: "archive.zip".into(), key: "archive.zip".into(), path: "archive.zip".into(),
+            name: "archive.zip".into(), key: "archive.zip".into(), path: archive_path,
             archive_entry: None, password: None, is_directory: false,
         };
         assert_eq!(context_menu_groups(&target), vec![
@@ -1232,7 +1330,7 @@ mod tests {
         use gpui::test::TestWindowExt;
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("source.zip");
-        std::fs::write(&path, b"archive").unwrap();
+        std::fs::write(&path, b"PK\x03\x04").unwrap();
         let (view, cx) = crate::tests::component_window(cx, |_, cx| {
             let mut manager = crate::tests::test_manager(cx);
             manager.current_directory = Some(directory.path().to_path_buf());

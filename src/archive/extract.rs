@@ -60,7 +60,7 @@ pub(crate) fn read_entry_range_with_budget(
         }
     }
 
-    let format = ResolvedFormat::from_path(path).context("Unsupported archive format")?;
+    let format = ResolvedFormat::from_file(path).context("Unsupported archive format")?;
     let budget = Cell::new(read_budget);
     let guarded = |reader| GuardedReader {
         reader,
@@ -267,14 +267,18 @@ pub fn extract_entry_with_password(
         .tempfile()
         .context("Failed to create a temporary file for the archive entry")?;
 
-    let format = ResolvedFormat::from_path(path)
+    let format = ResolvedFormat::from_file(path)
         .with_context(|| format!("Unsupported archive format: {}", path.display()))?;
     anyhow::ensure!(
         format.capabilities().can_extract,
         "This format cannot be extracted"
     );
     match format {
-        ResolvedFormat::Cpio | ResolvedFormat::Ar | ResolvedFormat::Pax | ResolvedFormat::Xar => {
+        ResolvedFormat::Cpio
+        | ResolvedFormat::Ar
+        | ResolvedFormat::Pax
+        | ResolvedFormat::Xar
+        | ResolvedFormat::Cab => {
             extract_extended_entry(path, entry_name, &mut output)?;
         }
         ResolvedFormat::Zip => {
@@ -375,7 +379,7 @@ pub fn extract_archive_selection_to(
     password: Option<&str>,
     selection: Option<&str>,
 ) -> Result<()> {
-    let format = ResolvedFormat::from_path(path)
+    let format = ResolvedFormat::from_file(path)
         .with_context(|| format!("Unsupported archive format: {}", path.display()))?;
     anyhow::ensure!(
         format.capabilities().can_extract,
@@ -429,7 +433,11 @@ pub fn extract_archive_selection_to(
     let staged =
         tempfile::tempdir_in(parent).context("Cannot create extraction staging directory")?;
     match format {
-        ResolvedFormat::Cpio | ResolvedFormat::Ar | ResolvedFormat::Pax | ResolvedFormat::Xar => {
+        ResolvedFormat::Cpio
+        | ResolvedFormat::Ar
+        | ResolvedFormat::Pax
+        | ResolvedFormat::Xar
+        | ResolvedFormat::Cab => {
             extract_extended_tree(path, staged.path(), selection.as_deref())?;
         }
         ResolvedFormat::Zip => {

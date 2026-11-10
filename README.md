@@ -204,6 +204,7 @@ and disk-image containers.
 | AR | Yes | Yes (individual files only) | Not available |
 | PAX | Yes | Yes | Not available |
 | XAR | Yes | Yes | Not available |
+| CAB | Yes | No | Not available |
 
 **TAR compression methods:** no compression (`.tar`), Gzip (`.tar.gz`),
 Bzip2 (`.tar.bz2`), XZ (`.tar.xz`), Zstandard (`.tar.zst`), LZ4 (`.tar.lz4`),

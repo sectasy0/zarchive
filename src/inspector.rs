@@ -332,7 +332,7 @@ impl ArchiveManager {
     ) {
         if !target.is_directory && (target.archive_entry.is_some()
             || !crate::archive::is_supported_archive(&target.path)
-            || crate::archive::ResolvedFormat::from_path(&target.path).is_some_and(|format| format.is_single_compressed()))
+            || crate::archive::ResolvedFormat::from_file(&target.path).is_some_and(|format| format.is_single_compressed()))
         {
             self.preview_text_target(target, window, cx);
             return;

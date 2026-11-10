@@ -95,14 +95,9 @@ fn open_picker_view(
     let directory = picker.directory.clone();
     let selected = picker.selected.clone();
     let search = picker.search_input.read(cx).value().trim().to_lowercase();
-    let mut entries: Vec<_> = picker
-        .entries
-        .iter()
-            .filter(|entry| search.is_empty() || entry.name.to_lowercase().contains(&search))
-        .cloned()
-        .collect();
-    crate::sort_entries(&mut entries, SortColumn::Name, true);
-    let count = entries.len();
+    let entries = picker.entries.clone();
+    let matching_indices = picker.matching_indices.clone();
+    let count = matching_indices.len();
     let language = manager.language;
     let column_widths = manager.column_widths;
     let active_directory = picker.directory.clone();
@@ -134,7 +129,7 @@ fn open_picker_view(
                 manager.load_open_picker_directory(path.clone(), window, cx);
             }))
     };
-    let header = gpui::base::TableRow::new("open-picker-header", 0)
+    let header = || gpui::base::TableRow::new("open-picker-header", 0)
         .flex()
         .items_center()
         .w_full()
@@ -180,8 +175,9 @@ fn open_picker_view(
         count,
         cx.processor(move |_manager, range: std::ops::Range<usize>, _, cx| {
             range
-                .filter_map(|index| {
-                    let entry = entries.get(index)?;
+                .filter_map(|row_index| {
+                    let entry_index = *matching_indices.get(row_index)?;
+                    let entry = entries.get(entry_index)?;
                     let name = entry.name.clone();
                     let path = directory.join(entry.source_path.as_deref().unwrap_or(&name));
                     let is_directory = entry.is_directory;
@@ -205,8 +201,8 @@ fn open_picker_view(
                     let click_path = path.clone();
                     let activate_path = path.clone();
                     Some(
-                        gpui::base::TableRow::new(("open-picker-row", index), index)
-                            .debug_selector(move || format!("open-picker-entry:{index}"))
+                        gpui::base::TableRow::new(("open-picker-row", row_index), row_index)
+                            .debug_selector(move || format!("open-picker-entry:{row_index}"))
                             .flex()
                             .items_center()
                             .h(px(28.0))
@@ -394,13 +390,103 @@ fn open_picker_view(
         .border_r_1()
         .border_color(rgb(theme.subtle_border))
         .child(places_content);
+    let loading_table = gpui::base::Table::new("open-picker-table")
+        .debug_selector(|| "open-picker-table".to_owned())
+        .flex()
+        .flex_col()
+        .flex_1()
+        .w_full()
+        .min_h(px(0.0))
+        .overflow_hidden()
+        .border_1()
+        .border_color(rgb(theme.border))
+        .child(header())
+        .child(
+            gpui::base::TableBody::new("open-picker-loading-body")
+                .flex()
+                .flex_col()
+                .flex_1()
+                .w_full()
+                .min_h(px(0.0))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .id("open-picker-loading")
+                        .debug_selector(|| "open-picker-loading".to_owned())
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .w_full()
+                        .children((0..12).map(|index| {
+                            gpui::base::TableRow::new(("open-picker-loading-row", index), index)
+                            .flex()
+                            .items_center()
+                            .w_full()
+                            .h(px(28.0))
+                            .flex_shrink_0()
+                            .px_2()
+                            .border_b_1()
+                            .border_color(rgb(theme.subtle_border))
+                            .bg(rgb(if index % 2 == 1 {
+                                theme.sidebar
+                            } else {
+                                theme.surface
+                            }))
+                            .child(
+                                gpui::base::TableCell::new("open-picker-loading-name", 0)
+                                    .flex()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .items_center()
+                                    .gap_2()
+                                    .child(crate::inspector::skeleton_bar(theme, 16.0, 16.0))
+                                    .child(crate::inspector::skeleton_bar(
+                                        theme,
+                                        148.0 + (index % 4) as f32 * 24.0,
+                                        9.0,
+                                    )),
+                            )
+                            .child(
+                                gpui::base::TableCell::new("open-picker-loading-type", 1)
+                                    .w(px(column_widths[0]))
+                                    .flex_shrink_0()
+                                    .pl_2()
+                                    .child(crate::inspector::skeleton_bar(
+                                        theme,
+                                        40.0 + (index % 3) as f32 * 8.0,
+                                        9.0,
+                                    )),
+                            )
+                            .child(
+                                gpui::base::TableCell::new("open-picker-loading-size", 2)
+                                    .w(px(column_widths[1]))
+                                    .flex_shrink_0()
+                                    .pl_2()
+                                    .child(crate::inspector::skeleton_bar(
+                                        theme,
+                                        44.0 + (index % 2) as f32 * 8.0,
+                                        9.0,
+                                    )),
+                            )
+                            .child(
+                                gpui::base::TableCell::new("open-picker-loading-modified", 3)
+                                    .w(px(column_widths[2]))
+                                    .flex_shrink_0()
+                                    .pl_2()
+                                    .child(crate::inspector::skeleton_bar(theme, 80.0, 9.0)),
+                            )
+                        })),
+                ),
+        );
     let table_area = div()
         .flex()
         .flex_col()
         .flex_1()
         .min_w(px(0.0))
         .min_h(px(0.0))
-        .child(if count == 0 {
+        .child(if picker.loading {
+            loading_table.into_any_element()
+        } else if count == 0 {
             div()
                 .flex()
                 .flex_1()
@@ -408,7 +494,11 @@ fn open_picker_view(
                 .justify_center()
                 .text_sm()
                 .text_color(rgb(theme.muted_text))
-                .child(language.text(if search.is_empty() { "This folder is empty" } else { "No matching items" }))
+                .child(language.text(if search.is_empty() {
+                    "This folder is empty"
+                } else {
+                    "No matching items"
+                }))
                 .into_any_element()
         } else {
             gpui::base::Table::new("open-picker-table")
@@ -421,7 +511,7 @@ fn open_picker_view(
                 .overflow_hidden()
                 .border_1()
                 .border_color(rgb(theme.border))
-                .child(header)
+                .child(header())
                 .child(
                     gpui::base::TableBody::new("open-picker-body")
                         .flex()
@@ -1357,7 +1447,7 @@ pub(crate) fn modal_view(
         .when(modal == Modal::OpenPicker, |dialog| dialog.gap_y(px(0.0)))
         .overlay_closable(modal != Modal::Password)
         .when(modal == Modal::Password, |this| {
-            this.width(px(blur::PASSWORD_WIDTH))
+            this.width(px(password::PASSWORD_WIDTH))
         })
         .close_button(modal != Modal::OpenPicker)
         .on_close(cx.listener(|this, _, window, cx| this.close_modal(window, cx)))

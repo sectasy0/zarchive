@@ -63,7 +63,7 @@ pub(crate) fn archive_drop_area(
 pub(crate) fn accepts_archive_drop(destination: &EntryTarget, sources: &[PathBuf]) -> bool {
     archive::can_add_to_archive(&destination.path)
         && (destination.archive_entry.is_none() || destination.is_directory)
-        && (archive::ResolvedFormat::from_path(&destination.path) != Some(archive::ResolvedFormat::Ar)
+        && (archive::ResolvedFormat::from_file(&destination.path) != Some(archive::ResolvedFormat::Ar)
             || (destination.archive_entry.is_none() && sources.iter().all(|source| source.is_file())))
         && !sources.is_empty() && sources.len() <= 256
         && sources.iter().all(|source| {
@@ -145,6 +145,9 @@ impl ArchiveManager {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.archive_drop_enabled() {
+            return;
+        }
         if target.archive_entry.is_some() {
             if accepts_folder_drag(target, directory) {
                 self.extract_archive_entry_to_folder(target, directory, window, cx);
@@ -193,13 +196,13 @@ impl ArchiveManager {
     pub(crate) fn receive_archive_drop(&mut self, destination: &EntryTarget, sources: &[PathBuf], window: &Window, cx: &mut Context<Self>) {
         if !self.archive_drop_enabled() { return; }
         if !accepts_archive_drop(destination, sources) {
-            let reason = if archive::ResolvedFormat::from_path(&destination.path) == Some(archive::ResolvedFormat::Rar)
+            let reason = if archive::ResolvedFormat::from_file(&destination.path) == Some(archive::ResolvedFormat::Rar)
                 && !archive::can_add_to_archive(&destination.path)
             {
                 "Install the rar command-line tool to modify RAR archives"
-            } else if archive::ResolvedFormat::from_path(&destination.path).is_some_and(|format| format.is_single_compressed()) {
+            } else if archive::ResolvedFormat::from_file(&destination.path).is_some_and(|format| format.is_single_compressed()) {
                 "A single compressed stream cannot contain additional files"
-            } else if archive::ResolvedFormat::from_path(&destination.path) == Some(archive::ResolvedFormat::Ar) {
+            } else if archive::ResolvedFormat::from_file(&destination.path) == Some(archive::ResolvedFormat::Ar) {
                 "AR archives support files only. Select individual files instead of folders."
             } else { "This location cannot accept the dropped files" };
             self.status_message = Some(format!("{}: {}", self.language.text("Failed to add to archive"),

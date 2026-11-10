@@ -1,4 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 use super::write::rar_program;
 
@@ -38,12 +42,14 @@ pub enum ArchiveFormat {
     Pax,
     /// XAR archive.
     Xar,
+    /// Microsoft Cabinet archive, read-only.
+    Cab,
 }
 
 impl ArchiveFormat {
     /// Archive container types currently recognized by the application.
     #[allow(dead_code)]
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Zip,
         Self::Tar,
         Self::SevenZip,
@@ -52,6 +58,7 @@ impl ArchiveFormat {
         Self::Ar,
         Self::Pax,
         Self::Xar,
+        Self::Cab,
     ];
 
     /// Returns the display name for this archive container.
@@ -65,12 +72,13 @@ impl ArchiveFormat {
             Self::Ar => "AR",
             Self::Pax => "PAX",
             Self::Xar => "XAR",
+            Self::Cab => "CAB",
         }
     }
 
     /// Reports whether this container can be created with the current writer set.
     fn can_create(self) -> bool {
-        !matches!(self, Self::Rar)
+        !matches!(self, Self::Rar | Self::Cab)
     }
 }
 
@@ -277,6 +285,7 @@ impl ResolvedFormat {
     pub const Ar: Self = Self::archive(ArchiveFormat::Ar, CompressionFormat::None);
     pub const Pax: Self = Self::archive(ArchiveFormat::Pax, CompressionFormat::None);
     pub const Xar: Self = Self::archive(ArchiveFormat::Xar, CompressionFormat::None);
+    pub const Cab: Self = Self::archive(ArchiveFormat::Cab, CompressionFormat::None);
     pub const Iso: Self = Self::disk_image(ContainerFormat::Iso);
     pub const Dmg: Self = Self::disk_image(ContainerFormat::Dmg);
     pub const Qcow2: Self = Self::disk_image(ContainerFormat::Qcow2);
@@ -386,6 +395,9 @@ impl ResolvedFormat {
                     ..FormatCapabilities::READ_ONLY_ARCHIVE
                 }
             }
+            (Some(ArchiveFormat::Cab), CompressionFormat::None, None) => {
+                FormatCapabilities::READ_ONLY_ARCHIVE
+            }
             (None, codec, None) if codec.supports_standalone() => {
                 FormatCapabilities::CREATEABLE_ARCHIVE
             }
@@ -460,6 +472,7 @@ impl ResolvedFormat {
             Some(ArchiveFormat::Ar) => "ar",
             Some(ArchiveFormat::Pax) => "pax",
             Some(ArchiveFormat::Xar) => "xar",
+            Some(ArchiveFormat::Cab) => "cab",
             None => self.compression.extension(),
         }
     }
@@ -495,7 +508,7 @@ impl ResolvedFormat {
     }
 
     pub(crate) fn is_extended_archive(self) -> bool {
-        matches!(self, Self::Cpio | Self::Ar | Self::Pax | Self::Xar)
+        matches!(self, Self::Cpio | Self::Ar | Self::Pax | Self::Xar | Self::Cab)
     }
 
     /// Reports whether this format compresses one file without an archive container.
@@ -566,6 +579,8 @@ impl ResolvedFormat {
             Some(Self::Pax)
         } else if name.ends_with(".xar") {
             Some(Self::Xar)
+        } else if name.ends_with(".cab") {
+            Some(Self::Cab)
         } else if name.ends_with(".iso") {
             Some(Self::Iso)
         } else if name.ends_with(".dmg") {
@@ -578,6 +593,116 @@ impl ResolvedFormat {
             None
         }
     }
+
+    /// Resolves a supported file only when its contents match the filename format.
+    pub(crate) fn from_file(path: &Path) -> Option<Self> {
+        let format = Self::from_path(path)?;
+        if !format.capabilities().can_list {
+            return None;
+        }
+
+        let signature_paths = if crate::volumes::numbered_base(path).is_some() {
+            crate::volumes::paths(path).ok()?
+        } else if format == Self::Rar {
+            vec![unrar::Archive::new(path).first_part()]
+        } else {
+            vec![path.to_owned()]
+        };
+        let mut prefix = Vec::with_capacity(64 * 1024);
+        let mut file_length = 0u64;
+        for signature_path in signature_paths {
+            let mut file = File::open(signature_path).ok()?;
+            file_length = file_length.saturating_add(file.metadata().ok()?.len());
+            let remaining = 64 * 1024 - prefix.len();
+            Read::by_ref(&mut file)
+                .take(remaining as u64)
+                .read_to_end(&mut prefix)
+                .ok()?;
+            if prefix.len() == 64 * 1024 {
+                break;
+            }
+        }
+        if prefix.windows(4).any(|bytes| {
+            bytes == b"PK\x03\x04" || bytes == b"PK\x05\x06" || bytes == b"PK\x07\x08"
+        }) {
+            return (format == Self::Zip).then_some(Self::Zip);
+        }
+        if prefix.starts_with(b"7z\xBC\xAF\x27\x1C") {
+            return (format == Self::SevenZip).then_some(Self::SevenZip);
+        }
+        if prefix.starts_with(b"Rar!\x1A\x07\x00") || prefix.starts_with(b"Rar!\x1A\x07\x01") {
+            return (format == Self::Rar).then_some(Self::Rar);
+        }
+        if has_tar_header(&prefix, file_length) {
+            return matches!(format, Self::Tar | Self::Pax).then_some(format);
+        }
+        if [b"070701".as_slice(), b"070702", b"070707"]
+            .iter()
+            .any(|signature| prefix.starts_with(signature))
+        {
+            return (format == Self::Cpio).then_some(Self::Cpio);
+        }
+        if prefix.starts_with(b"!<arch>\n") || prefix.starts_with(b"!<thin>\n") {
+            return (format == Self::Ar).then_some(Self::Ar);
+        }
+        if prefix.starts_with(b"xar!") {
+            return (format == Self::Xar).then_some(Self::Xar);
+        }
+        if prefix.starts_with(b"MSCF") {
+            return (format == Self::Cab).then_some(Self::Cab);
+        }
+        let detected_compression = CompressionFormat::ALL
+            .into_iter()
+            .find(|compression| has_compression_signature(*compression, &prefix));
+        if let Some(compression) = detected_compression {
+            return (format.compression == compression).then_some(format);
+        }
+
+        // Brotli streams have no identifying header; the decoder validates them on read.
+        (format.compression == CompressionFormat::Brotli).then_some(format)
+    }
+}
+
+fn has_compression_signature(format: CompressionFormat, bytes: &[u8]) -> bool {
+    match format {
+        CompressionFormat::None => false,
+        CompressionFormat::Gzip => bytes.starts_with(b"\x1F\x8B\x08"),
+        CompressionFormat::Bzip2 => bytes.starts_with(b"BZh"),
+        CompressionFormat::Xz => bytes.starts_with(b"\xFD7zXZ\0"),
+        CompressionFormat::Zstandard => bytes.starts_with(b"\x28\xB5\x2F\xFD"),
+        CompressionFormat::Lz4 => bytes.starts_with(b"\x04\x22\x4D\x18"),
+        CompressionFormat::Lzip => bytes.starts_with(b"LZIP"),
+        CompressionFormat::Brotli => false,
+    }
+}
+
+fn has_tar_header(bytes: &[u8], file_length: u64) -> bool {
+    let Some(header) = bytes.get(..512) else {
+        return false;
+    };
+    if header.iter().all(|byte| *byte == 0) {
+        return file_length >= 1024
+            && bytes
+                .get(..1024)
+                .is_some_and(|end_markers| end_markers.iter().all(|byte| *byte == 0));
+    }
+
+    let Some(checksum) = header
+        .get(148..156)
+        .and_then(|field| std::str::from_utf8(field).ok())
+        .map(|field| field.trim_matches(|character| character == '\0' || character == ' '))
+        .and_then(|field| u64::from_str_radix(field, 8).ok())
+    else {
+        return false;
+    };
+    let actual_checksum = header.iter().enumerate().fold(0u64, |sum, (index, byte)| {
+        sum + if (148..156).contains(&index) {
+            u64::from(b' ')
+        } else {
+            u64::from(*byte)
+        }
+    });
+    checksum == actual_checksum && header[..100].iter().any(|byte| *byte != 0)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

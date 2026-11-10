@@ -2258,12 +2258,12 @@ const TRANSLATIONS: &[(&str, &str, &str, &str, &str, &str)] = &[
         "Unterstützte Formate",
     ),
     (
-        "Read and extract: ZIP, TAR, compressed TAR, CPIO, AR, PAX, XAR, standalone GZIP, BZIP2, XZ, Zstandard, LZ4, LZIP, Brotli, 7z, RAR",
-        "Odczyt i rozpakowywanie: ZIP, TAR, skompresowany TAR, CPIO, AR, PAX, XAR, samodzielne GZIP, BZIP2, XZ, Zstandard, LZ4, LZIP, Brotli, 7z, RAR",
-        "读取和解压：ZIP、TAR、压缩 TAR、CPIO、AR、PAX、XAR、独立 GZIP、BZIP2、XZ、Zstandard、LZ4、LZIP、Brotli、7z、RAR",
-        "Lectura y extracción: ZIP, TAR, TAR comprimido, CPIO, AR, PAX, XAR, GZIP independiente, BZIP2, XZ, Zstandard, LZ4, LZIP, Brotli, 7z, RAR",
-        "読み取りと展開：ZIP、TAR、圧縮 TAR、CPIO、AR、PAX、XAR、単独 GZIP、BZIP2、XZ、Zstandard、LZ4、LZIP、Brotli、7z、RAR",
-        "Lesen und Entpacken: ZIP, TAR, komprimiertes TAR, CPIO, AR, PAX, XAR, eigenständiges GZIP, BZIP2, XZ, Zstandard, LZ4, LZIP, Brotli, 7z, RAR",
+        "Read and extract: ZIP, TAR, compressed TAR, CPIO, AR, PAX, XAR, CAB, standalone GZIP, BZIP2, XZ, Zstandard, LZ4, LZIP, Brotli, 7z, RAR",
+        "Odczyt i rozpakowywanie: ZIP, TAR, skompresowany TAR, CPIO, AR, PAX, XAR, CAB, samodzielne GZIP, BZIP2, XZ, Zstandard, LZ4, LZIP, Brotli, 7z, RAR",
+        "读取和解压：ZIP、TAR、压缩 TAR、CPIO、AR、PAX、XAR、CAB、独立 GZIP、BZIP2、XZ、Zstandard、LZ4、LZIP、Brotli、7z、RAR",
+        "Lectura y extracción: ZIP, TAR, TAR comprimido, CPIO, AR, PAX, XAR, CAB, GZIP independiente, BZIP2, XZ, Zstandard, LZ4, LZIP, Brotli, 7z, RAR",
+        "読み取りと展開：ZIP、TAR、圧縮 TAR、CPIO、AR、PAX、XAR、CAB、単独 GZIP、BZIP2、XZ、Zstandard、LZ4、LZIP、Brotli、7z、RAR",
+        "Lesen und Entpacken: ZIP, TAR, komprimiertes TAR, CPIO, AR, PAX, XAR, CAB, eigenständiges GZIP, BZIP2, XZ, Zstandard, LZ4, LZIP, Brotli, 7z, RAR",
     ),
     (
         "Create: ZIP",

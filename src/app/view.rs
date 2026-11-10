@@ -31,9 +31,18 @@ impl Render for ArchiveManager {
         } else {
             self.current_directory.clone()
         };
-        let item_count = self.visible_browser_entries().len();
+        let original_browser = self.active_browser;
+        let mut pane_entries = [Vec::new(), Vec::new()];
+        for (pane_index, entries) in pane_entries.iter_mut().enumerate() {
+            self.active_browser = pane_index;
+            *entries = self.visible_browser_entries();
+        }
+        self.active_browser = original_browser;
+        let pane_entry_counts = [pane_entries[0].len(), pane_entries[1].len()];
+        let active_entries = &pane_entries[original_browser];
+        let item_count = active_entries.len();
         let location_size = self
-            .location_size(&self.visible_browser_entries())
+            .location_size(active_entries)
             .map(format_size)
             .unwrap_or_else(|| {
                 if !self.auto_calculate_folder_sizes {
@@ -159,7 +168,6 @@ impl Render for ArchiveManager {
             }
         }
 
-        let original_browser = self.active_browser;
         let mut build_file_list = |pane_index| {
         self.active_browser = pane_index;
         let file_list_id = if pane_index == 0 { "file-list" } else { "file-list-secondary" };
@@ -169,7 +177,7 @@ impl Render for ArchiveManager {
             && !self.show_favorites
             && self.creation_task.is_none();
         let search_query = self.toolbar_search.text_query();
-        let visible_entries = self.visible_browser_entries();
+        let visible_entries = std::mem::take(&mut pane_entries[pane_index]);
         let item_count = visible_entries.len();
         let column_order = self.column_order;
         let visible_columns = self.visible_columns;
@@ -375,7 +383,16 @@ impl Render for ArchiveManager {
         let mut browser_panels = Vec::new();
         for (pane_index, file_list) in file_lists.into_iter().enumerate() {
             browser_panels.push(
-                browser_panel(self, pane_index, file_list, language, theme, cx).into_any_element(),
+                browser_panel(
+                    self,
+                    pane_index,
+                    file_list,
+                    pane_entry_counts[pane_index],
+                    language,
+                    theme,
+                    cx,
+                )
+                .into_any_element(),
             );
         }
 
@@ -883,9 +900,6 @@ impl Render for ArchiveManager {
                     )
                 },
             )
-            .when(self.modal.is_some(), |this| {
-                this.child(self.password_blur.view())
-            })
     }
 }
 
@@ -1024,6 +1038,7 @@ fn browser_panel(
     manager: &mut ArchiveManager,
     pane_index: usize,
     file_list: impl IntoElement,
+    visible_entry_count: usize,
     language: Language,
     theme: Theme,
     cx: &mut Context<ArchiveManager>,
@@ -1066,7 +1081,7 @@ fn browser_panel(
     let folder_drop_view = cx.entity().downgrade();
     let folder_drop_tab_id = manager.active_browser_tab().id;
     let folder_drop_scroll = manager.file_scroll.clone();
-    let folder_drop_row_count = manager.visible_browser_entries().len();
+    let folder_drop_row_count = visible_entry_count;
     let mut tab_items = Vec::with_capacity(tab_count);
     for (tab_index, (label, icon)) in tab_labels.into_iter().enumerate() {
         let selected = active_tab == tab_index;
@@ -1479,7 +1494,10 @@ fn sidebar_button_content(
     selected: bool,
     available: bool,
     theme: Theme,
+    debug_prefix: Option<String>,
 ) -> impl IntoElement {
+    let icon_selector = debug_prefix.as_ref().map(|prefix| format!("{prefix}-icon"));
+    let label_selector = debug_prefix.map(|prefix| format!("{prefix}-label"));
     div()
         .flex()
         .items_center()
@@ -1496,15 +1514,24 @@ fn sidebar_button_content(
                     theme.sidebar
                 })),
         )
-        .child(icon.text_color(rgb(if !available {
-            theme.faint_text
-        } else if selected {
-            theme.accent
-        } else {
-            theme.muted_text
-        })))
         .child(
             div()
+                .when_some(icon_selector, |this, selector| {
+                    this.debug_selector(move || selector.clone())
+                })
+                .child(icon.text_color(rgb(if !available {
+                    theme.faint_text
+                } else if selected {
+                    theme.accent
+                } else {
+                    theme.muted_text
+                }))),
+        )
+        .child(
+            div()
+                .when_some(label_selector, |this, selector| {
+                    this.debug_selector(move || selector.clone())
+                })
                 .flex()
                 .flex_col()
                 .flex_1()
@@ -1553,6 +1580,7 @@ fn favorites_place_button(
             active,
             true,
             theme,
+            None,
         ));
     button
 }
@@ -1580,7 +1608,9 @@ fn recent_folder_row(
     let click_target = target.clone();
     let selected = current_directory == Some(path);
     let selector = format!("{id_prefix}-folder-{index}");
-    let item = Button::new(format!("{id_prefix}-folder-button-{index}"))
+    let button_selector = format!("{id_prefix}-folder-button-{index}");
+    let item = Button::new(button_selector.clone())
+        .debug_selector(move || button_selector.clone())
         .custom(ui::sidebar_button_style(theme, selected, cx))
         .small()
         .w_full()
@@ -1597,15 +1627,14 @@ fn recent_folder_row(
             selected,
             true,
             theme,
+            Some(format!("recent-folder-content-{index}")),
         ));
     let row = div()
         .id(gpui::SharedString::from(format!("{selector}-target")))
         .debug_selector(move || selector.clone())
         .w_full()
         .child(item);
-    let row = row.when(drop_enabled, |row| {
-        drop_service::folder_drop_area(row, target, theme, drop_enabled, cx)
-    });
+    let row = drop_service::folder_drop_area(row, target, theme, drop_enabled, cx);
     let menu_path = path.to_path_buf();
     let menu_view = cx.entity().downgrade();
     row.context_menu(move |menu, _, _| {
@@ -1664,6 +1693,7 @@ fn location_shortcut(
             selected,
             is_available,
             theme,
+            None,
         ));
     let drop_id = match id {
         "place-home" => "place-drop-home",
@@ -2129,6 +2159,10 @@ fn file_row(
         }
     });
     let is_favorite = favorite_folders.contains(&target.path);
+    let target_is_archive = target.archive_entry.is_none()
+        && !target.is_directory
+        && archive::ResolvedFormat::from_path(&target.path)
+            .is_some_and(|format| format.capabilities().can_list);
     let click_target = target.clone();
     let drop_target = target.clone();
     let drag_target = target.clone();
@@ -2138,17 +2172,14 @@ fn file_row(
         .filter(|_| {
             target.archive_entry.is_none()
                 && !target.is_directory
-                && !archive::is_supported_archive(&target.path)
+                && !target_is_archive
         });
-    let adds_to_archive = (!target.is_directory
-        && target.archive_entry.is_none()
-        && archive::is_supported_archive(&target.path))
+    let adds_to_archive = target_is_archive
         || (target.is_directory && target.archive_entry.is_some());
     let archive_feedback_color = drop_service::archive_drop_feedback_color(theme);
     let drop_candidate = drop_to_directory.is_some()
         || (target.is_directory && target.archive_entry.is_none())
-        || (archive::is_supported_archive(&target.path)
-            && (target.archive_entry.is_none() || target.is_directory));
+        || target_is_archive;
     let menu_view = cx.entity().downgrade();
     let striped = row_index % 2 == 1;
     let cells = column_order
@@ -2337,7 +2368,7 @@ fn sort_column_index(column: SortColumn) -> usize {
 pub(crate) fn file_icon(extension: &str) -> &'static str {
     match extension.to_ascii_lowercase().as_str() {
         "zip" | "7z" | "rar" | "tar" | "gz" | "tgz" | "bz2" | "tbz" | "tbz2" | "xz" | "txz"
-        | "zst" | "lz4" | "lz" | "br" | "cpio" | "ar" | "a" | "pax" | "xar" => "archive",
+        | "zst" | "lz4" | "lz" | "br" | "cpio" | "ar" | "a" | "pax" | "xar" | "cab" => "archive",
         "pdf" => "pdf",
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "heic" => "image",
         "mp3" | "wav" | "flac" | "aac" | "ogg" | "m4a" => "audio",
@@ -2362,11 +2393,7 @@ pub(crate) fn entry_icon(entry: &ArchiveEntry) -> &'static str {
         .rsplit_once('.')
         .map(|(_, extension)| extension.to_ascii_uppercase())
         .unwrap_or_default();
-    let icon = if archive::is_supported_archive(std::path::Path::new(&entry.name)) {
-        "archive"
-    } else {
-        file_icon(&extension)
-    };
+    let icon = file_icon(&extension);
     if entry.is_encrypted && icon == "archive" {
         "archive-locked"
     } else {

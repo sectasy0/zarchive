@@ -371,12 +371,12 @@ pub(super) fn write_rar_archive_with_program(
 
 pub(crate) fn can_add_to_archive(path: &Path) -> bool {
     !is_multipart_archive(path)
-        && ResolvedFormat::from_path(path).is_some_and(|format| format.capabilities().can_modify)
+        && ResolvedFormat::from_file(path).is_some_and(|format| format.capabilities().can_modify)
 }
 
 pub(crate) fn can_replace_archive_entry(path: &Path) -> bool {
     !is_multipart_archive(path)
-        && ResolvedFormat::from_path(path)
+        && ResolvedFormat::from_file(path)
             .is_some_and(|format| format.capabilities().can_modify && format != ResolvedFormat::Rar)
 }
 
@@ -395,7 +395,7 @@ pub(crate) fn add_to_archive_with_password(
         !is_multipart_archive(path),
         "Multipart archives are read-only"
     );
-    let format = ResolvedFormat::from_path(path).context("Unsupported archive format")?;
+    let format = ResolvedFormat::from_file(path).context("Unsupported archive format")?;
     anyhow::ensure!(
         format.archive.is_some(),
         "A single compressed stream cannot contain additional files"
@@ -519,7 +519,7 @@ pub(crate) fn remove_archive_entry(path: &Path, name: &str, password: Option<&st
         !is_multipart_archive(path),
         "Multipart archives are read-only"
     );
-    let format = ResolvedFormat::from_path(path).context("Unsupported archive format")?;
+    let format = ResolvedFormat::from_file(path).context("Unsupported archive format")?;
     anyhow::ensure!(
         format.capabilities().can_modify,
         "This archive format cannot be modified"
@@ -590,7 +590,7 @@ pub(crate) fn replace_archive_entry_with_password(
         !is_multipart_archive(path),
         "Multipart archives are read-only"
     );
-    let format = ResolvedFormat::from_path(path).context("Unsupported archive format")?;
+    let format = ResolvedFormat::from_file(path).context("Unsupported archive format")?;
     anyhow::ensure!(
         format.capabilities().can_modify && format != ResolvedFormat::Rar,
         "This archive format cannot replace entries"

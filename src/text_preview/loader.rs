@@ -187,7 +187,8 @@ impl CsvTable {
 
 pub(super) fn preview_filename(target: &EntryTarget) -> String {
     target.archive_entry.clone().unwrap_or_else(|| {
-        if crate::archive::ResolvedFormat::from_path(&target.path)
+        if crate::archive::ResolvedFormat::from_file(&target.path)
+            .or_else(|| (!target.path.exists()).then(|| crate::archive::ResolvedFormat::from_path(&target.path)).flatten())
             .is_some_and(|format| format.is_single_compressed())
         {
             crate::archive::single_compressed_entry_name(&target.path)
@@ -258,7 +259,7 @@ pub(super) fn load_with_limit(
             cancel,
             max_bytes,
         )?
-    } else if crate::archive::ResolvedFormat::from_path(&target.path)
+    } else if crate::archive::ResolvedFormat::from_file(&target.path)
         .is_some_and(|format| format.is_single_compressed())
     {
         let name = crate::archive::single_compressed_entry_name(&target.path)?;
@@ -291,7 +292,7 @@ pub(super) fn load_remaining(
             cancel,
             offset,
         )
-    } else if crate::archive::ResolvedFormat::from_path(&target.path)
+    } else if crate::archive::ResolvedFormat::from_file(&target.path)
         .is_some_and(|format| format.is_single_compressed())
     {
         let name = crate::archive::single_compressed_entry_name(&target.path)?;

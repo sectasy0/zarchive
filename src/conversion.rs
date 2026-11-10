@@ -33,7 +33,7 @@ pub(crate) struct Assessment {
 
 fn stamp(source: &Path) -> Result<Vec<(PathBuf, u64, Option<std::time::SystemTime>)>> {
     let mut paths = crate::volumes::paths(source)?;
-    if ResolvedFormat::from_path(source) == Some(ResolvedFormat::Rar) && crate::volumes::numbered_base(source).is_none() {
+    if ResolvedFormat::from_file(source) == Some(ResolvedFormat::Rar) && crate::volumes::numbered_base(source).is_none() {
         let first = unrar::Archive::new(source).first_part();
         paths = std::fs::read_dir(source.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new(".")))?
             .map(|entry| entry.map(|entry| entry.path())).collect::<std::io::Result<Vec<_>>>()?
@@ -50,7 +50,7 @@ fn stamp(source: &Path) -> Result<Vec<(PathBuf, u64, Option<std::time::SystemTim
 
 pub(crate) fn analyze(source: &Path, password: Option<&str>, cancel: &AtomicBool) -> Result<Analysis> {
     let before = stamp(source)?;
-    let source_format = ResolvedFormat::from_path(source).context("Unsupported archive format")?;
+    let source_format = ResolvedFormat::from_file(source).context("Unsupported archive format")?;
     let report = inspection::inspect(source, password, InspectionMode::Preview, cancel);
     crate::task_queue::checkpoint()?;
     anyhow::ensure!(!cancel.load(std::sync::atomic::Ordering::Relaxed), "Task cancelled");

@@ -3,7 +3,6 @@ mod conversion;
 mod shortcuts;
 mod app;
 mod xar;
-mod blur;
 mod browser;
 mod comparison;
 mod creation;
@@ -214,7 +213,6 @@ struct ArchiveManager {
     creation: creation::ArchiveCreationForm,
     creation_task: Option<u64>,
     password_prompt: password::PasswordPrompt,
-    password_blur: blur::PasswordBlur,
     controls: ui::Controls,
     file_actions: file_actions::FileActions,
     inspector: inspector::Inspector,
@@ -842,9 +840,6 @@ impl ArchiveManager {
         if modal == Modal::CreateArchive && self.creation_task.is_some() {
             return;
         }
-        if self.modal.is_none() {
-            self.password_blur.capture(window, cx);
-        }
         self.modal = Some(modal);
         window.focus(&self.modal_focus, cx);
         cx.notify();
@@ -859,7 +854,6 @@ impl ArchiveManager {
             self.password_prompt.clear();
             self.file_actions.operations.cancel_password();
         }
-        self.password_blur.clear();
         if self.modal == Some(Modal::CreateArchive) {
             self.creation.password.clear();
             self.creation.confirmation.clear();
@@ -1133,7 +1127,6 @@ fn main() {
                             modal_focus: cx.focus_handle(),
                             creation: creation::ArchiveCreationForm::new(cx),
                             creation_task: None,
-                            password_blur: blur::PasswordBlur::default(),
                             controls: ui::Controls::default(),
                             file_actions: file_actions::FileActions::default(),
                             inspector: inspector::Inspector::default(),
@@ -1261,9 +1254,17 @@ mod tests {
             manager
         });
         cx.update(|window, cx| {
-            view.update(cx, |manager, cx| manager.show_open_picker(false, window, cx));
+            view.update(cx, |manager, cx| {
+                manager.show_open_picker(false, window, cx)
+            });
         });
-        cx.read(|cx| assert!(view.read(cx).file_actions.open_picker.is_some()));
+        cx.read(|cx| {
+            assert!(view.read(cx).file_actions.open_picker.as_ref().unwrap().loading);
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("open-picker-loading").is_some());
         cx.update(|window, cx| {
             let _ = window.draw(cx);
             window.simulate_next_frame(cx);
@@ -1509,7 +1510,6 @@ mod tests {
             creation: crate::creation::ArchiveCreationForm::new(cx),
             creation_task: None,
             password_prompt: crate::password::PasswordPrompt::new(cx, None),
-            password_blur: crate::blur::PasswordBlur::default(),
             controls: crate::ui::Controls::default(),
             file_actions: crate::file_actions::FileActions::default(),
             inspector: crate::inspector::Inspector::default(),
@@ -2246,6 +2246,53 @@ mod tests {
         let type_header = cx.debug_bounds("sort-type").unwrap();
         let modified_header = cx.debug_bounds("sort-modified").unwrap();
         assert!(type_header.origin.x > modified_header.origin.x);
+    }
+
+    #[gpui::test]
+    fn recent_sidebar_geometry_stays_stable_while_modal_opens(cx: &mut gpui::TestAppContext) {
+        let directories: Vec<_> = (0..24)
+            .map(|_| tempfile::tempdir().unwrap())
+            .collect();
+        let recent: Vec<_> = directories
+            .iter()
+            .map(|directory| directory.path().to_path_buf())
+            .collect();
+        let (view, cx) = component_window(cx, |_, cx| {
+            let mut manager = test_manager(cx);
+            manager.current_directory = None;
+            manager.recent_folders = recent.clone();
+            manager.auto_calculate_folder_sizes = false;
+            manager
+        });
+        let initial_row = cx.debug_bounds("recent-folder-0").unwrap();
+        let initial_button = cx.debug_bounds("recent-folder-button-0").unwrap();
+        let initial_icon = cx.debug_bounds("recent-folder-content-0-icon").unwrap();
+        let initial_label = cx.debug_bounds("recent-folder-content-0-label").unwrap();
+
+        cx.update(|window, cx| {
+            view.update(cx, |manager, cx| manager.show_modal(super::Modal::About, window, cx));
+        });
+        cx.run_until_parked();
+        let modal_row = cx.debug_bounds("recent-folder-0").unwrap();
+        let modal_button = cx.debug_bounds("recent-folder-button-0").unwrap();
+        let modal_icon = cx.debug_bounds("recent-folder-content-0-icon").unwrap();
+        let modal_label = cx.debug_bounds("recent-folder-content-0-label").unwrap();
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        let closed_row = cx.debug_bounds("recent-folder-0").unwrap();
+        let closed_button = cx.debug_bounds("recent-folder-button-0").unwrap();
+        let closed_icon = cx.debug_bounds("recent-folder-content-0-icon").unwrap();
+        let closed_label = cx.debug_bounds("recent-folder-content-0-label").unwrap();
+
+        assert_eq!(modal_row, initial_row);
+        assert_eq!(closed_row, initial_row);
+        assert_eq!(modal_button, initial_button);
+        assert_eq!(closed_button, initial_button);
+        assert_eq!(modal_label, initial_label);
+        assert_eq!(closed_label, initial_label);
+        assert_eq!(modal_icon, initial_icon);
+        assert_eq!(closed_icon, initial_icon);
     }
 
     #[gpui::test]

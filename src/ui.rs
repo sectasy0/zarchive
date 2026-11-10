@@ -77,7 +77,6 @@ fn format_index_path(index: usize) -> Option<IndexPath> {
 pub struct Controls {
     selects: BTreeMap<Selector, SelectControl>,
     modal: Option<crate::Modal>,
-    modal_generation: u64,
     dark: Option<bool>,
     accent_color: Option<crate::AccentColor>,
     language: Option<Language>,
@@ -326,27 +325,10 @@ pub fn prepare(
     if manager.controls.modal != manager.modal {
         if manager.controls.modal.is_some() {
             window.close_dialog(cx);
-            manager.password_blur.clear();
         }
-        manager.controls.modal_generation += 1;
-        let generation = manager.controls.modal_generation;
         manager.controls.modal = manager.modal;
         if let Some(modal) = manager.modal {
-            let view = cx.entity().downgrade();
-            window.on_next_frame(move |window, cx| {
-                let _ = view.update(cx, |manager, cx| {
-                    if manager.modal != Some(modal)
-                        || manager.controls.modal_generation != generation
-                    {
-                        return;
-                    }
-                    if !manager.password_blur.has_capture() {
-                        manager.password_blur.capture(window, cx);
-                    }
-                    open_dialog(modal, window, cx);
-                    cx.notify();
-                });
-            });
+            open_dialog(modal, window, cx);
         }
     }
     let language = manager.language;
@@ -538,7 +520,7 @@ mod tests {
             crate::Modal::Delete,
         ] {
             let width = if modal == crate::Modal::Password {
-                crate::blur::PASSWORD_WIDTH
+                crate::password::PASSWORD_WIDTH
             } else if modal == crate::Modal::Settings {
                 620.0
             } else {
@@ -546,8 +528,6 @@ mod tests {
             };
             cx.update(|window, cx| {
                 view.update(cx, |manager, cx| manager.show_modal(modal, window, cx));
-                let _ = window.draw(cx);
-                window.simulate_next_frame(cx);
                 let _ = window.draw(cx);
             });
             cx.run_until_parked();
@@ -559,8 +539,8 @@ mod tests {
                 let _ = window.draw(cx);
             });
             let panel = cx.debug_bounds("dialog-0").unwrap();
-            let background = cx.debug_bounds("modal-blurred-background").unwrap();
-            assert!((panel.center().y - background.center().y).abs() <= gpui::px(1.0));
+            let viewport_height = cx.update(|window, _| window.viewport_size().height);
+            assert!((panel.center().y - viewport_height / 2.0).abs() <= gpui::px(1.0));
             cx.update(|window, _| assert!(painted_dialog_surface(window, width)));
             for _ in 0..3 {
                 cx.update(|window, cx| {
@@ -582,7 +562,7 @@ mod tests {
                 cx.run_until_parked();
                 let resized = cx.debug_bounds("dialog-0").unwrap();
                 assert_ne!(resized.size.height, panel.size.height);
-                assert!((resized.center().y - background.center().y).abs() <= gpui::px(1.0));
+                assert!((resized.center().y - viewport_height / 2.0).abs() <= gpui::px(1.0));
             }
             cx.simulate_keystrokes("escape");
             cx.run_until_parked();
@@ -632,8 +612,8 @@ mod tests {
     }
 
     #[gpui::test]
-    /// Verifies modal backdrops render and are removed after the dialog closes.
-    fn every_modal_has_blurred_background_and_removes_it_on_close(cx: &mut gpui::TestAppContext) {
+    /// Verifies every modal renders and closes without a custom backdrop layer.
+    fn every_modal_renders_and_removes_on_close(cx: &mut gpui::TestAppContext) {
         let (view, cx) = crate::tests::component_window(cx, |_, cx| {
             let mut manager = crate::tests::test_manager(cx);
             manager.current_directory = None;
@@ -650,33 +630,24 @@ mod tests {
                 view.update(cx, |manager, cx| manager.show_modal(modal, window, cx));
             });
             cx.run_until_parked();
-            cx.update(|window, cx| {
-                window.simulate_next_frame(cx);
-            });
-            cx.run_until_parked();
             for viewport in [
                 gpui::size(gpui::px(1100.0), gpui::px(720.0)),
                 gpui::size(gpui::px(560.0), gpui::px(440.0)),
             ] {
                 cx.simulate_resize(viewport);
                 cx.run_until_parked();
-                let background = cx
-                    .debug_bounds("modal-blurred-background")
-                    .expect("modal has blur layer");
                 let dialog = cx
                     .debug_bounds("dialog-0")
-                    .expect("dialog is rendered above blur");
-                assert!(background.size.width > gpui::px(0.0));
-                assert!(background.size.height > gpui::px(0.0));
-                assert!(dialog.right() <= background.right());
-                assert!(dialog.bottom() <= background.bottom());
-                assert!((dialog.center().x - background.center().x).abs() <= gpui::px(1.0));
-                assert!((dialog.center().y - background.center().y).abs() <= gpui::px(1.0));
+                    .expect("dialog is rendered");
+                assert!(dialog.size.width <= viewport.width);
+                assert!(dialog.size.height <= viewport.height);
+                assert!((dialog.center().x - viewport.width / 2.0).abs() <= gpui::px(1.0));
+                assert!((dialog.center().y - viewport.height / 2.0).abs() <= gpui::px(1.0));
             }
             cx.simulate_keystrokes("escape");
             cx.run_until_parked();
             cx.read(|cx| assert!(view.read(cx).modal.is_none()));
-            assert!(cx.debug_bounds("modal-blurred-background").is_none());
+            assert!(cx.debug_bounds("dialog-0").is_none());
         }
     }
 

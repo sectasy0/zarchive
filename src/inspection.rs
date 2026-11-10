@@ -154,6 +154,8 @@ fn expected_format(path: &Path) -> Option<ResolvedFormat> {
         Some(ResolvedFormat::Pax)
     } else if name.ends_with(".xar") {
         Some(ResolvedFormat::Xar)
+    } else if name.ends_with(".cab") {
+        Some(ResolvedFormat::Cab)
     } else {
         None
     }
@@ -165,6 +167,8 @@ pub fn detect_format(header: &[u8]) -> Option<ResolvedFormat> {
         Some(ResolvedFormat::Ar)
     } else if header.starts_with(b"xar!") {
         Some(ResolvedFormat::Xar)
+    } else if header.starts_with(b"MSCF") {
+        Some(ResolvedFormat::Cab)
     } else if header.starts_with(b"070701") || header.starts_with(b"070702")
         || header.starts_with(b"070707") || header.starts_with(&[0x71, 0xc7])
         || header.starts_with(&[0xc7, 0x71]) {
@@ -424,7 +428,7 @@ fn inspect_inner(
     }
     let mut budget = mode.max_total_bytes();
     match format {
-        ResolvedFormat::Cpio | ResolvedFormat::Ar | ResolvedFormat::Pax => {
+        ResolvedFormat::Cpio | ResolvedFormat::Ar | ResolvedFormat::Pax | ResolvedFormat::Cab => {
             let mut reader = archive::open_extended_archive(&report.path)?;
             loop {
                 anyhow::ensure!(!cancel.load(Ordering::Relaxed), "Inspection cancelled");

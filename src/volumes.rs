@@ -828,7 +828,11 @@ mod tests {
                 std::fs::remove_file(&path).unwrap();
                 assert!(parts.len() > 1);
                 let selected = parts.last().unwrap();
-                assert!(archive::is_supported_archive(selected));
+                assert!(
+                    archive::is_supported_archive(selected),
+                    "{format:?}: {}",
+                    selected.display()
+                );
                 assert_eq!(archive::is_password_protected(selected), password.is_some());
                 assert!(!archive::can_add_to_archive(selected));
                 assert!(!archive::can_replace_archive_entry(selected));

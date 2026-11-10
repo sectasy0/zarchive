@@ -1,13 +1,13 @@
 use super::*;
 
-/// Reports whether the path has a supported archive filename extension.
+/// Reports whether the path has a supported extension and matching content signature.
 pub fn is_supported_archive(path: &Path) -> bool {
-    ResolvedFormat::from_path(path).is_some_and(|format| format.capabilities().can_list)
+    ResolvedFormat::from_file(path).is_some_and(|format| format.capabilities().can_list)
 }
 
 /// Checks ZIP and 7z metadata for password protection without extracting entries.
 pub(crate) fn is_password_protected(path: &Path) -> bool {
-    match ResolvedFormat::from_path(path) {
+    match ResolvedFormat::from_file(path) {
         Some(ResolvedFormat::Zip) => open_archive_reader(path)
             .ok()
             .and_then(|file| ZipArchive::new(file).ok())
@@ -35,11 +35,16 @@ pub(crate) fn is_password_protected(path: &Path) -> bool {
 }
 
 pub(crate) fn open_archive_reader(path: &Path) -> Result<ArchiveReader> {
+    if crate::volumes::numbered_base(path).is_some() {
+        crate::volumes::paths(path)
+            .map_err(|error| anyhow::anyhow!("Failed to open {}: {error}", path.display()))?;
+    }
+    let format = ResolvedFormat::from_path(path).context("Unsupported archive format")?;
     anyhow::ensure!(
         !is_spanned_zip(path),
         "Native split ZIP archives (.z01) are not supported"
     );
-    let path = if ResolvedFormat::from_path(path) == Some(ResolvedFormat::Rar) {
+    let path = if format == ResolvedFormat::Rar {
         unrar::Archive::new(path).first_part()
     } else {
         path.to_owned()
@@ -90,7 +95,7 @@ pub(crate) fn is_primary_volume(path: &Path) -> bool {
 
 /// Reports whether the resolved file format supports content extraction.
 pub fn can_extract_archive(path: &Path) -> bool {
-    ResolvedFormat::from_path(path).is_some_and(|format| format.capabilities().can_extract)
+    ResolvedFormat::from_file(path).is_some_and(|format| format.capabilities().can_extract)
 }
 
 /// Lists archive entries without supplying a password.
@@ -103,8 +108,17 @@ pub fn list_archive_with_password(
     path: &Path,
     password: Option<&str>,
 ) -> Result<Vec<ArchiveEntry>> {
-    let format = ResolvedFormat::from_path(path)
-        .with_context(|| format!("Unsupported archive format: {}", path.display()))?;
+    if crate::volumes::numbered_base(path).is_some() {
+        crate::volumes::paths(path)
+            .map_err(|error| anyhow::anyhow!("Failed to open {}: {error}", path.display()))?;
+    }
+    let format = ResolvedFormat::from_file(path).with_context(|| {
+        if ResolvedFormat::from_path(path) == Some(ResolvedFormat::Zip) {
+            "The ZIP archive is invalid or damaged.".to_owned()
+        } else {
+            format!("Unsupported archive format: {}", path.display())
+        }
+    })?;
     anyhow::ensure!(
         format.capabilities().can_list,
         "This format cannot be listed"
@@ -136,7 +150,8 @@ pub(super) fn open_tar_reader(path: &Path, format: ResolvedFormat) -> Result<Box
 pub(crate) struct ExtendedEntryReader<'a, 'b>(pub(crate) &'a mut libarchive2::ReadArchive<'b>);
 
 pub(crate) fn open_extended_archive(path: &Path) -> Result<libarchive2::ReadArchive<'static>> {
-    let options: &[(&str, &str, &str)] = if ResolvedFormat::from_path(path) == Some(ResolvedFormat::Cpio) {
+    let format = ResolvedFormat::from_path(path).context("Unsupported archive format")?;
+    let options: &[(&str, &str, &str)] = if format == ResolvedFormat::Cpio {
         &[("cpio", "hdrcharset", "UTF-8")]
     } else {
         &[]
@@ -161,7 +176,7 @@ impl Read for ExtendedEntryReader<'_, '_> {
 }
 
 pub(super) fn list_extended_archive(path: &Path) -> Result<Vec<ArchiveEntry>> {
-    if ResolvedFormat::from_path(path) == Some(ResolvedFormat::Xar) {
+    if ResolvedFormat::from_file(path) == Some(ResolvedFormat::Xar) {
         let reader = crate::xar::XarReader::new(open_archive_reader(path)?)?;
         return Ok(reader
             .entries
@@ -212,7 +227,7 @@ pub(super) fn extract_extended_entry(
     name: &str,
     output: &mut impl Write,
 ) -> Result<()> {
-    if ResolvedFormat::from_path(path) == Some(ResolvedFormat::Xar) {
+    if ResolvedFormat::from_file(path) == Some(ResolvedFormat::Xar) {
         let mut reader = crate::xar::XarReader::new(open_archive_reader(path)?)?;
         let entry = reader
             .entries
@@ -245,7 +260,7 @@ pub(super) fn extract_extended_tree(
     destination: &Path,
     selection: Option<&Path>,
 ) -> Result<()> {
-    if ResolvedFormat::from_path(path) == Some(ResolvedFormat::Xar) {
+    if ResolvedFormat::from_file(path) == Some(ResolvedFormat::Xar) {
         let mut reader = crate::xar::XarReader::new(open_archive_reader(path)?)?;
         for entry in reader.entries.clone() {
             anyhow::ensure!(
@@ -306,7 +321,9 @@ pub(super) fn list_single_compressed(
 pub(crate) fn single_compressed_entry_name(path: &Path) -> Result<String> {
     let base = crate::volumes::numbered_base(path);
     let path = base.as_deref().unwrap_or(path);
-    let format = ResolvedFormat::from_path(path).context("Unsupported compressed file format")?;
+    let format = ResolvedFormat::from_file(path)
+        .or_else(|| (!path.exists()).then(|| ResolvedFormat::from_path(path)).flatten())
+        .context("Unsupported compressed file format")?;
     anyhow::ensure!(
         format.capabilities().can_extract && format.is_single_compressed(),
         "Expected a standalone compressed file"
@@ -331,12 +348,12 @@ pub(crate) fn single_compressed_entry_name(path: &Path) -> Result<String> {
 
 /// Reports whether a path names a standalone compressed file rather than an archive container.
 pub(crate) fn is_single_compressed_archive(path: &Path) -> bool {
-    ResolvedFormat::from_path(path).is_some_and(ResolvedFormat::is_single_compressed)
+    ResolvedFormat::from_file(path).is_some_and(ResolvedFormat::is_single_compressed)
 }
 
 /// Decompresses one standalone stream to a new file without overwriting existing data.
 pub(crate) fn extract_single_compressed_to(path: &Path, destination: &Path) -> Result<()> {
-    let format = ResolvedFormat::from_path(path).context("Unsupported compressed file format")?;
+    let format = ResolvedFormat::from_file(path).context("Unsupported compressed file format")?;
     anyhow::ensure!(
         format.is_single_compressed(),
         "Expected a standalone compressed file"

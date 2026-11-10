@@ -602,7 +602,8 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), before);
         if super::rar_program().is_none() {
             let path = directory.path().join("target.rar");
-            std::fs::write(&path, "unchanged").unwrap();
+            let original = b"Rar!\x1A\x07\x00";
+            std::fs::write(&path, original).unwrap();
             assert!(!super::can_add_to_archive(&path));
             let error = super::add_to_archive(&path, &[source], "").unwrap_err();
             assert!(
@@ -610,7 +611,7 @@ mod tests {
                     .to_string()
                     .contains("Install the rar command-line tool")
             );
-            assert_eq!(std::fs::read_to_string(path).unwrap(), "unchanged");
+            assert_eq!(std::fs::read(path).unwrap(), original);
         }
     }
 
@@ -926,6 +927,77 @@ mod tests {
             Some(ResolvedFormat::Rar)
         );
         assert!(!ResolvedFormat::ALL.contains(&ResolvedFormat::Rar));
+    }
+
+    #[test]
+    /// Requires a matching file signature in addition to a supported extension.
+    fn rejects_archive_extensions_with_mismatched_signatures() {
+        let directory = tempfile::tempdir().unwrap();
+        let mismatched = directory.path().join("renamed.zip");
+        std::fs::write(&mismatched, b"\x1F\x8B\x08gzip data").unwrap();
+
+        assert_eq!(ResolvedFormat::from_file(&mismatched), None);
+        assert!(!super::is_supported_archive(&mismatched));
+        assert!(super::list_archive(&mismatched).is_err());
+
+        let matching = directory.path().join("archive.zip");
+        std::fs::write(&matching, b"PK\x03\x04").unwrap();
+        assert!(super::is_supported_archive(&matching));
+    }
+
+    #[test]
+    fn cabinet_archives_are_read_only_and_can_be_listed_and_extracted() {
+        use std::io::Read;
+
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join("sample.cab");
+        let mut bytes = vec![0; 83];
+        bytes[..4].copy_from_slice(b"MSCF");
+        bytes[8..12].copy_from_slice(&83u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&44u32.to_le_bytes());
+        bytes[24] = 3;
+        bytes[25] = 1;
+        bytes[26..28].copy_from_slice(&1u16.to_le_bytes());
+        bytes[28..30].copy_from_slice(&1u16.to_le_bytes());
+        bytes[32..34].copy_from_slice(&1u16.to_le_bytes());
+        bytes[36..40].copy_from_slice(&70u32.to_le_bytes());
+        bytes[40..42].copy_from_slice(&1u16.to_le_bytes());
+        bytes[44..48].copy_from_slice(&5u32.to_le_bytes());
+        bytes[58..60].copy_from_slice(&0x20u16.to_le_bytes());
+        bytes[60..69].copy_from_slice(b"hello.txt");
+        bytes[74..76].copy_from_slice(&5u16.to_le_bytes());
+        bytes[76..78].copy_from_slice(&5u16.to_le_bytes());
+        bytes[78..83].copy_from_slice(b"hello");
+        std::fs::write(&archive, bytes).unwrap();
+
+        assert_eq!(ResolvedFormat::from_file(&archive), Some(ResolvedFormat::Cab));
+        let capabilities = ResolvedFormat::Cab.capabilities();
+        assert!(capabilities.can_list && capabilities.can_extract && capabilities.can_test);
+        assert!(!capabilities.can_create && !capabilities.can_modify);
+        assert!(super::can_extract_archive(&archive));
+
+        let entries = list_archive(&archive).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "hello.txt");
+        assert_eq!(entries[0].size, 5);
+        let report = crate::inspection::inspect(
+            &archive,
+            None,
+            crate::inspection::InspectionMode::Integrity,
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        assert_eq!(report.detected, Some(ResolvedFormat::Cab));
+        assert!(report.error.is_none(), "{:?}", report.error);
+        assert_eq!(report.entries[0].name, "hello.txt");
+
+        let mut extracted = extract_entry(&archive, "hello.txt").unwrap();
+        let mut contents = Vec::new();
+        extracted.read_to_end(&mut contents).unwrap();
+        assert_eq!(contents, b"hello");
+
+        let destination = directory.path().join("extracted");
+        extract_archive_to(&archive, &destination, None).unwrap();
+        assert_eq!(std::fs::read(destination.join("hello.txt")).unwrap(), b"hello");
     }
 
     #[test]
@@ -1350,7 +1422,6 @@ mod tests {
                 let path = directory
                     .path()
                     .join(format!("notes.txt.{}", format.extension()));
-                assert!(super::is_supported_archive(&path));
                 create_archive(
                     &path,
                     std::slice::from_ref(&source),
@@ -1361,6 +1432,7 @@ mod tests {
                     },
                 )
                 .unwrap();
+                assert!(super::is_supported_archive(&path));
                 let entries = list_archive(&path).unwrap();
                 assert_eq!(entries.len(), 1);
                 assert_eq!(entries[0].name, "notes.txt");
