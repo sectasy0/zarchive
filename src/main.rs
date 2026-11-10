@@ -22,6 +22,7 @@ mod rar_recovery;
 mod parity;
 mod secret;
 mod security;
+mod archive_signature;
 mod toolbar;
 mod text_preview;
 mod task_queue;
@@ -83,6 +84,8 @@ enum Modal {
     Delete,
     /// Selects two archives and displays their comparison report.
     CompareArchives,
+    /// Signs an archive using a Minisign secret key.
+    SignArchive,
     Recovery,
     Conversion,
     Info,
@@ -213,6 +216,7 @@ struct ArchiveManager {
     creation: creation::ArchiveCreationForm,
     creation_task: Option<u64>,
     password_prompt: password::PasswordPrompt,
+    archive_signature: archive_signature::State,
     controls: ui::Controls,
     file_actions: file_actions::FileActions,
     inspector: inspector::Inspector,
@@ -871,6 +875,9 @@ impl ArchiveManager {
         if self.modal == Some(Modal::Info) {
             self.file_actions.info_target = None;
         }
+        if self.modal == Some(Modal::SignArchive) {
+            self.archive_signature.clear();
+        }
         self.modal = None;
         window.focus(&self.content_focus, cx);
         cx.notify();
@@ -1102,6 +1109,7 @@ fn main() {
                                 cx,
                                 initial_password_archive,
                             ),
+                            archive_signature: archive_signature::State::new(cx),
                             content_focus: cx.focus_handle(),
                             opened_files: Vec::new(),
                             status_message: None,
@@ -1510,6 +1518,7 @@ mod tests {
             creation: crate::creation::ArchiveCreationForm::new(cx),
             creation_task: None,
             password_prompt: crate::password::PasswordPrompt::new(cx, None),
+            archive_signature: crate::archive_signature::State::new(cx),
             controls: crate::ui::Controls::default(),
             file_actions: crate::file_actions::FileActions::default(),
             inspector: crate::inspector::Inspector::default(),

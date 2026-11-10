@@ -101,6 +101,18 @@ available while your files are processed.
   create AES-256 encrypted archives, including optional filename encryption for
   7z. Protected archives are marked in the file list. Passwords are never saved
   to preferences or logs.
+- **Sign and verify archive contents.** Sign supported writable archives with a
+  Minisign secret key; the passphrase is kept only for the operation. The
+  signature record is embedded at `.zarchive/signature.minisig.json` and covers
+  sorted entry paths, types, sizes, link targets, and SHA-256 hashes of file
+  contents. Verification checks archive integrity and compares every entry with
+  that manifest without extracting files. This signs the logical entries, not
+  the exact compressed container bytes. The public key is embedded with the
+  signature but is not independently trusted by zarchive: a valid result proves
+  consistency with that key, not who created the archive. Confirm the key
+  identity through a trusted channel before relying on its provenance. Existing
+  signatures are replaced when re-signing; changing entries invalidates them.
+  Read-only formats such as CAB can be verified but not signed.
 - **Inspect archive contents.** Review entry sizes, compression, checksums,
   permissions, ownership, comments, extra fields, link targets, and filesystem
   metadata where available. Overview includes archive integrity and entry

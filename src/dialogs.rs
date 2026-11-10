@@ -1269,6 +1269,7 @@ pub(crate) fn modal_view(
             Modal::CompareArchives => "Compare archives",
             Modal::Recovery => "Archive Repair & Recovery",
             Modal::Conversion => "Convert archive",
+            Modal::SignArchive => "Sign archive",
             Modal::Info => "Info",
             Modal::Password => "Archive password",
             Modal::Delete => if manager.file_actions.pending_delete.as_ref().is_some_and(|target| target.archive_entry.is_some()) {
@@ -1300,6 +1301,9 @@ pub(crate) fn modal_view(
         }
         Modal::Conversion => {
             content = content.child(crate::conversion::view(manager, theme, cx));
+        }
+        Modal::SignArchive => {
+            content = content.child(crate::archive_signature::view(manager, theme, cx));
         }
         Modal::Info => {
             content = content.child(file_actions::info_view(manager, theme, language));
@@ -1425,6 +1429,7 @@ pub(crate) fn modal_view(
         Modal::CreateArchive => creation::footer(manager, cx).into_any_element(),
         Modal::Recovery => crate::recovery::footer(manager, cx).into_any_element(),
         Modal::Conversion => crate::conversion::footer(manager, cx).into_any_element(),
+        Modal::SignArchive => crate::archive_signature::footer(manager, cx).into_any_element(),
         Modal::CompareArchives => {
             crate::inspector::comparison_footer(manager, cx).into_any_element()
         }
@@ -1457,6 +1462,7 @@ pub(crate) fn modal_view(
                 Some(Modal::CreateArchive) => this.submit_archive(window, cx),
                 Some(Modal::Recovery) => this.start_recovery(cx),
                 Some(Modal::Conversion) => this.analyze_conversion(cx),
+                Some(Modal::SignArchive) => this.submit_archive_signature(window, cx),
                 Some(Modal::CompareArchives) => this.start_archive_comparison(cx),
                 Some(Modal::Delete) => this.confirm_delete(window, cx),
                 Some(Modal::OpenPicker) => this.submit_open_picker(window, cx),

@@ -92,6 +92,8 @@ pub enum EntryAction {
     Inspect,
     TestIntegrity,
     Audit,
+    SignArchive,
+    VerifySignature,
     CopyPath,
     Info,
     Trash,
@@ -112,6 +114,8 @@ impl EntryAction {
             Self::Inspect => "Inspector",
             Self::TestIntegrity => "Test integrity",
             Self::Audit => "Audit archive",
+            Self::SignArchive => "Sign archive",
+            Self::VerifySignature => "Verify signature",
             Self::CopyPath => "Copy path",
             Self::Info => "Info",
             Self::Trash => "Move to Trash",
@@ -132,6 +136,8 @@ impl EntryAction {
             Self::Inspect => IconName::FileSearch.into(),
             Self::TestIntegrity => IconName::ShieldCheck.into(),
             Self::Audit => IconName::ScanSearch.into(),
+            Self::SignArchive => IconName::ShieldCheck.into(),
+            Self::VerifySignature => IconName::ShieldCheck.into(),
             Self::CopyPath => IconName::Copy.into(),
             Self::Info => IconName::Info.into(),
             Self::Trash => IconName::Trash.into(),
@@ -161,7 +167,11 @@ impl EntryTarget {
                 actions.extend([
                     EntryAction::TestIntegrity,
                     EntryAction::Audit,
+                    EntryAction::VerifySignature,
                 ]);
+                if archive::can_add_to_archive(&self.path) {
+                    actions.push(EntryAction::SignArchive);
+                }
             }
             actions.extend([
                 EntryAction::CreateArchive,
@@ -866,7 +876,7 @@ fn context_menu_groups(target: &EntryTarget) -> Vec<Vec<EntryAction>> {
     let groups: &[&[EntryAction]] = &[
         &[Open, OpenInNewTab],
         &[CreateArchive, ExtractHere, ExtractArchive, ConvertArchive, Extract],
-        &[Inspect, TestIntegrity, Audit],
+        &[Inspect, TestIntegrity, Audit, VerifySignature, SignArchive],
         &[CopyPath, MoveTo],
         &[Info, Trash],
     ];
@@ -924,6 +934,8 @@ pub fn menu(
                             | EntryAction::ExtractArchive
                             | EntryAction::ExtractHere
                             | EntryAction::ConvertArchive
+                            | EntryAction::SignArchive
+                            | EntryAction::VerifySignature
                     ),
                 )
                 .on_click(move |_, window, cx| {
@@ -943,6 +955,12 @@ pub fn menu(
                             this.request_extract_archive(&target, true, window, cx)
                         }
                         EntryAction::ConvertArchive => this.open_conversion(window, cx),
+                        EntryAction::SignArchive => {
+                            this.open_sign_archive(target.clone(), window, cx)
+                        }
+                        EntryAction::VerifySignature => {
+                            this.verify_archive_signature(&target, cx)
+                        }
                         EntryAction::MoveTo => this.request_move(&target, window, cx),
                         EntryAction::Inspect => this.preview_archive_target(&target, window, cx),
                         EntryAction::TestIntegrity | EntryAction::Audit => {
@@ -1145,7 +1163,7 @@ mod tests {
         assert_eq!(context_menu_groups(&target), vec![
             vec![Open, OpenInNewTab],
             vec![CreateArchive, ExtractHere, ExtractArchive, ConvertArchive],
-            vec![Inspect, TestIntegrity, Audit],
+            vec![Inspect, TestIntegrity, Audit, VerifySignature, SignArchive],
             vec![CopyPath, MoveTo],
             vec![Info, Trash],
         ]);

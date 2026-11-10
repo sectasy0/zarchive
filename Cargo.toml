@@ -50,6 +50,7 @@ infer = "0.19"
 kamadak-exif = "0.6.1"
 libarchive2 = "0.2.1"
 libc = "0.2"
+minisign = "0.10"
 md-5 = "0.10"
 memchr = "2"
 lz4_flex = "0.14"
@@ -60,6 +61,7 @@ par2-rs = { version = "0.11", default-features = false, features = ["crypto-rust
 roxmltree = "0.21"
 rust-par2 = "0.2"
 sevenz-rust = { version = "0.6.1", features = ["aes256"] }
+serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 similar = "2.7"
 tar = "0.4"

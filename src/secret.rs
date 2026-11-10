@@ -23,6 +23,7 @@ pub enum SecretField {
     Confirmation,
     Recovery,
     Conversion,
+    ArchiveSigning,
 }
 
 /// Stores a zeroizing secret alongside its masked input and focus handle.
@@ -73,6 +74,7 @@ fn input(manager: &mut ArchiveManager, field: SecretField) -> &mut SecretInput {
         SecretField::Confirmation => &mut manager.creation.confirmation,
         SecretField::Recovery => &mut manager.recovery.password,
         SecretField::Conversion => &mut manager.conversion.password,
+        SecretField::ArchiveSigning => &mut manager.archive_signature.passphrase,
     }
 }
 
@@ -142,6 +144,12 @@ pub fn prepare(
     );
     prepare_input(&mut manager.recovery.password, SecretField::Recovery, window, cx);
     prepare_input(&mut manager.conversion.password, SecretField::Conversion, window, cx);
+    prepare_input(
+        &mut manager.archive_signature.passphrase,
+        SecretField::ArchiveSigning,
+        window,
+        cx,
+    );
 }
 
 /// Renders one prepared password field and controls whether it can be edited.
