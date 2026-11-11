@@ -125,10 +125,11 @@ jobs:
             exit 1
           fi
 
-          mkdir -p dist/dmg
-          ditto "$app_bundle" "dist/dmg/$(basename "$app_bundle")"
-          ln -s /Applications dist/dmg/Applications
-          hdiutil create -volname "ZArchive" -srcfolder dist/dmg -ov -format UDZO \
+          dmg_stage="$(mktemp -d "${RUNNER_TEMP}/zarchive-dmg.XXXXXX")"
+          trap 'rm -rf "$dmg_stage"' EXIT
+          ditto "$app_bundle" "$dmg_stage/$(basename "$app_bundle")"
+          ln -s /Applications "$dmg_stage/Applications"
+          hdiutil create -volname "ZArchive" -srcfolder "$dmg_stage" -ov -format UDZO \
             dist/zarchive-macos-arm64.dmg
 
       - name: Package Windows Binary and Runtime Libraries
@@ -190,10 +191,31 @@ jobs:
           & $light -nologo -ext WixUIExtension -out (Join-Path $dist 'zarchive-windows-x64.msi') (Join-Path $dist 'Product.wixobj') (Join-Path $dist 'RuntimeFiles.wixobj')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Upload Build
+      - name: Upload Linux Package
+        if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
           name: zarchive-${{ matrix.platform }}
-          path: dist/*
+          path: dist/zarchive-${{ matrix.platform }}.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload macOS DMG
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: zarchive-${{ matrix.platform }}
+          path: dist/zarchive-${{ matrix.platform }}.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Windows Packages
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: zarchive-${{ matrix.platform }}
+          path: |
+            dist/zarchive-${{ matrix.platform }}.zip
+            dist/zarchive-${{ matrix.platform }}.msi
           if-no-files-found: error
           retention-days: 14
