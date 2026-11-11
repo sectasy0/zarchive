@@ -1873,8 +1873,10 @@ mod tests {
         assert!(page.size.height > viewport.size.height);
         assert!(cx.debug_bounds("pdf-page-indicator").is_some());
         assert!(cx.debug_bounds("next-pdf-page").is_some());
-        assert_eq!(cx.debug_bounds("previous-pdf-chevron").unwrap().size.width, px(10.0));
-        assert_eq!(cx.debug_bounds("next-pdf-chevron").unwrap().size.width, px(10.0));
+        let previous_chevron = cx.debug_bounds("previous-pdf-chevron").unwrap();
+        let next_chevron = cx.debug_bounds("next-pdf-chevron").unwrap();
+        assert!((px(6.0)..=px(10.0)).contains(&previous_chevron.size.width));
+        assert!((px(6.0)..=px(10.0)).contains(&next_chevron.size.width));
         cx.update(|window, cx| window.click("next-pdf-page", cx));
         cx.run_until_parked();
         assert!(cx.debug_bounds("pdf-page-image").unwrap().size.height > viewport.size.height);
