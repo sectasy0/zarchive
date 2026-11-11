@@ -185,7 +185,7 @@ impl EntryTarget {
     }
 
     /// Extracts this archived file into a temporary file.
-    fn extract(&self) -> anyhow::Result<tempfile::NamedTempFile> {
+    pub(crate) fn extract(&self) -> anyhow::Result<tempfile::NamedTempFile> {
         let entry = self
             .archive_entry
             .as_deref()

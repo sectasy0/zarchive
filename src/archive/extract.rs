@@ -45,7 +45,7 @@ pub(crate) fn read_entry_range_with_budget(
     max_bytes: usize,
     read_budget: u64,
 ) -> Result<Vec<u8>> {
-    use crate::text_preview::{GuardedReader, read_from_offset, read_prefix_with_limit};
+    use crate::preview::{GuardedReader, read_from_offset, read_prefix_with_limit};
     use std::{cell::Cell, sync::atomic::Ordering};
     fn read_entry_bytes(
         reader: &mut impl Read,

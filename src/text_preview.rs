@@ -5,7 +5,7 @@ use gpui::component::{
     button::{Button, ButtonVariants},
     input::{Editor, EditorState},
 };
-use gpui::{Context, IntoElement, Render, Window, div, prelude::*, px, rgb};
+use gpui::{Context, IntoElement, Render, RenderImage, Window, div, img, prelude::*, px, rgb};
 mod loader;
 pub(super) use loader::*;
 
@@ -22,6 +22,15 @@ pub(crate) struct Preview {
     manager: gpui::WeakEntity<ArchiveManager>,
     content: Option<TextContent>,
     hex: Option<HexPreview>,
+    image: Option<Arc<RenderImage>>,
+    pdf: Option<PdfPreview>,
+    pdf_loading: bool,
+    media: Option<MediaPreview>,
+    video_frame: Option<Arc<RenderImage>>,
+    video_playing: bool,
+    video_stop: Option<Arc<AtomicBool>>,
+    video_processes: Option<VideoProcesses>,
+    video_revision: u64,
     raw_bytes: Vec<u8>,
     editor: Option<gpui::Entity<EditorState>>,
     csv: Option<CsvTable>,
@@ -34,6 +43,7 @@ pub(crate) struct Preview {
     cancel: Arc<AtomicBool>,
     task: Option<u64>,
     scroll: gpui::UniformListScrollHandle,
+    pdf_scroll: gpui::ScrollHandle,
     pub theme: Theme,
     pub language: Language,
     limits: crate::preferences::AdvancedSettings,
@@ -44,6 +54,12 @@ pub(crate) struct Preview {
 impl Drop for Preview {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
+        if let Some(stop) = &self.video_stop {
+            stop.store(true, Ordering::Release);
+        }
+        if let Some(processes) = &self.video_processes {
+            stop_video_processes(processes);
+        }
     }
 }
 
@@ -74,6 +90,15 @@ impl ArchiveManager {
             manager,
             content: None,
             hex: None,
+            image: None,
+            pdf: None,
+            pdf_loading: false,
+            media: None,
+            video_frame: None,
+            video_playing: false,
+            video_stop: None,
+            video_processes: None,
+            video_revision: 0,
             raw_bytes: Vec::new(),
             editor: None,
             csv: None,
@@ -86,6 +111,7 @@ impl ArchiveManager {
             cancel: cancel.clone(),
             task: None,
             scroll: gpui::UniformListScrollHandle::new(),
+            pdf_scroll: gpui::ScrollHandle::new(),
             theme,
             language,
             limits,
@@ -142,6 +168,9 @@ impl ArchiveManager {
                                             preview.content = Some(content);
                                         }
                                         PreviewData::Binary(hex) => preview.hex = Some(hex),
+                                        PreviewData::Image(image) => preview.image = Some(image),
+                                        PreviewData::Pdf(pdf) => preview.pdf = Some(pdf),
+                                        PreviewData::Media(media) => preview.media = Some(media),
                                     }
                                 }
                                 Err(crate::task_queue::TaskFailure::Cancelled) => {},
@@ -209,6 +238,9 @@ impl ArchiveManager {
                             preview.editor = None;
                             preview.content = None;
                             preview.hex = None;
+                            preview.image = None;
+                            preview.pdf = None;
+                            preview.media = None;
                             match loaded.data {
                                 PreviewData::Text(content) => {
                                     if preview.csv.is_none() {
@@ -225,7 +257,53 @@ impl ArchiveManager {
                                     preview.content = Some(content);
                                 }
                                 PreviewData::Binary(hex) => preview.hex = Some(hex),
+                                PreviewData::Image(image) => preview.image = Some(image),
+                                PreviewData::Pdf(pdf) => preview.pdf = Some(pdf),
+                                PreviewData::Media(media) => preview.media = Some(media),
                             }
+                        }
+                        Err(crate::task_queue::TaskFailure::Cancelled) => {}
+                        Err(crate::task_queue::TaskFailure::Failed(error)) => {
+                            preview.load_more_error = Some(format!("{error:#}"));
+                        }
+                    }
+                    cx.notify();
+                });
+            },
+            cx,
+        );
+    }
+
+    fn enqueue_pdf_page(
+        &mut self,
+        preview: gpui::WeakEntity<Preview>,
+        path: std::path::PathBuf,
+        bytes: Arc<Vec<u8>>,
+        page_index: usize,
+        cancel: Arc<AtomicBool>,
+        cx: &mut Context<Self>,
+    ) {
+        self.background_queue.enqueue(
+            "Rendering PDF page...",
+            crate::task_queue::TaskControl::with_cancel(cancel).for_paths([path]),
+            move |control, reporter| async move {
+                if !control.checkpoint() {
+                    anyhow::bail!("PDF preview cancelled");
+                }
+                let page = render_pdf_page(bytes, page_index)?;
+                reporter.set(1, 1);
+                if !control.checkpoint() {
+                    anyhow::bail!("PDF preview cancelled");
+                }
+                Ok(page)
+            },
+            move |_, result, _, cx| {
+                let _ = preview.update(cx, |preview, cx| {
+                    preview.pdf_loading = false;
+                    match result {
+                        Ok(page) => {
+                            preview.pdf = Some(page);
+                            preview.load_more_error = None;
                         }
                         Err(crate::task_queue::TaskFailure::Cancelled) => {}
                         Err(crate::task_queue::TaskFailure::Failed(error)) => {
@@ -371,7 +449,122 @@ impl Preview {
         cx.notify();
     }
 
+    fn show_pdf_page(&mut self, page_index: usize, cx: &mut Context<Self>) {
+        if self.pdf_loading {
+            return;
+        }
+        let Some(pdf) = self.pdf.as_ref() else { return; };
+        if page_index >= pdf.page_count || page_index == pdf.page_index {
+            return;
+        }
+        let bytes = pdf.bytes.clone();
+        let path = self.target.path.clone();
+        let cancel = self.cancel.clone();
+        let preview = cx.entity().downgrade();
+        self.pdf_loading = true;
+        let _ = self.manager.update(cx, |manager, cx| {
+            manager.enqueue_pdf_page(preview, path, bytes, page_index, cancel, cx);
+        });
+        cx.notify();
+    }
+
+    fn toggle_video_playback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(stop) = self.video_stop.take() {
+            stop.store(true, Ordering::Release);
+            if let Some(processes) = self.video_processes.take() {
+                stop_video_processes(&processes);
+            }
+            self.video_playing = false;
+            self.video_revision = self.video_revision.wrapping_add(1);
+            self.video_frame = None;
+            cx.notify();
+            return;
+        }
+
+        self.video_revision = self.video_revision.wrapping_add(1);
+        let revision = self.video_revision;
+        let stop = Arc::new(AtomicBool::new(false));
+        self.video_stop = Some(stop.clone());
+        let processes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        self.video_processes = Some(processes.clone());
+        self.video_playing = true;
+        self.video_frame = None;
+        self.error = None;
+        let target = self.target.clone();
+        let worker_stop = stop.clone();
+        let worker_processes = processes;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            match decode_video_stream(target, worker_stop.clone(), sender.clone(), worker_processes) {
+                Ok(()) if !worker_stop.load(Ordering::Acquire) => {
+                    let _ = sender.send(VideoMessage::Finished);
+                }
+                Ok(()) => {}
+                Err(error) => {
+                    let _ = sender.send(VideoMessage::Failed(format!("{error:#}")));
+                }
+            }
+        });
+
+        let preview = cx.entity().downgrade();
+        let executor = cx.background_executor().clone();
+        window
+            .spawn(cx, async move |async_cx| loop {
+                let update = async_cx.update(|_, cx| {
+                    preview.update(cx, |preview, cx| {
+                        if preview.video_revision != revision {
+                            return false;
+                        }
+                        match receiver.try_recv() {
+                            Ok(VideoMessage::Frame(frame)) => preview.video_frame = Some(frame),
+                            Ok(VideoMessage::Finished) => {
+                                preview.video_playing = false;
+                                preview.video_stop = None;
+                                preview.video_processes = None;
+                                cx.notify();
+                                return false;
+                            }
+                            Ok(VideoMessage::Failed(error)) => {
+                                preview.error = Some(error);
+                                preview.video_playing = false;
+                                preview.video_stop = None;
+                                preview.video_processes = None;
+                                cx.notify();
+                                return false;
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                preview.video_playing = false;
+                                preview.video_stop = None;
+                                preview.video_processes = None;
+                                cx.notify();
+                                return false;
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+                        }
+                        cx.notify();
+                        true
+                    })
+                });
+                match update {
+                    Ok(Ok(true)) => executor.timer(std::time::Duration::from_millis(16)).await,
+                    Ok(Ok(false)) => break,
+                    Ok(Err(error)) if error.is::<std::cell::BorrowMutError>() => {
+                        executor.timer(std::time::Duration::from_millis(16)).await;
+                    }
+                    Err(error) if error.is::<std::cell::BorrowMutError>() => {
+                        executor.timer(std::time::Duration::from_millis(16)).await;
+                    }
+                    _ => break,
+                }
+            })
+            .detach();
+        cx.notify();
+    }
+
     fn can_edit(&self) -> bool {
+        if self.image.is_some() || self.media.is_some() || is_pdf_target(&self.target) {
+            return false;
+        }
         let complete = self
             .content
             .as_ref()
@@ -534,7 +727,16 @@ impl Render for Preview {
         } else {
             None
         };
-        let preview_label = if self.hex.is_some() {
+        let preview_label = if self.image.is_some() {
+            "Image preview"
+        } else if let Some(media) = &self.media {
+            match media.kind {
+                MediaKind::Audio => "Audio preview",
+                MediaKind::Video => "Video preview",
+            }
+        } else if self.pdf.is_some() || is_pdf_target(&self.target) {
+            "PDF preview"
+        } else if self.hex.is_some() {
             if self.editing { "Hex editor" } else { "Binary preview" }
         } else if self.editing {
             "Text editor"
@@ -566,7 +768,13 @@ impl Render for Preview {
                     .px_2()
                     .border_b_1()
                     .border_color(rgb(theme.border))
-                    .child(if self.hex.is_some() {
+                    .child(if self.image.is_some() {
+                        crate::app_icon("image", 14.0, theme.accent).into_any_element()
+                    } else if self.media.is_some() {
+                        crate::app_icon("audio", 14.0, theme.accent).into_any_element()
+                    } else if is_pdf_target(&self.target) {
+                        crate::app_icon("pdf", 14.0, theme.accent).into_any_element()
+                    } else if self.hex.is_some() {
                         crate::app_icon("binary", 14.0, theme.accent).into_any_element()
                     } else if self.csv.is_some() {
                         crate::app_icon("csv", 14.0, theme.accent).into_any_element()
@@ -591,6 +799,45 @@ impl Render for Preview {
                             .truncate()
                             .child(title),
                     )
+                    .when_some(self.pdf.as_ref(), |header, pdf| {
+                        let previous_page = pdf.page_index.saturating_sub(1);
+                        let next_page = pdf.page_index.saturating_add(1);
+                        header
+                            .child(
+                                Button::new("previous-pdf-page")
+                                    .debug_selector(|| "previous-pdf-page".to_owned())
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(gpui::assets::IconName::ChevronLeft)
+                                    .tooltip(language.text("Previous page"))
+                                    .accessibility_label(language.text("Previous page"))
+                                    .disabled(pdf.page_index == 0 || self.pdf_loading)
+                                    .on_click(cx.listener(move |preview, _, _, cx| {
+                                        preview.show_pdf_page(previous_page, cx);
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("pdf-page-indicator")
+                                    .debug_selector(|| "pdf-page-indicator".to_owned())
+                                    .text_xs()
+                                    .text_color(rgb(theme.muted_text))
+                                    .child(format!("{} {}/{}", language.text("Page"), pdf.page_index + 1, pdf.page_count)),
+                            )
+                            .child(
+                                Button::new("next-pdf-page")
+                                    .debug_selector(|| "next-pdf-page".to_owned())
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(gpui::assets::IconName::ChevronRight)
+                                    .tooltip(language.text("Next page"))
+                                    .accessibility_label(language.text("Next page"))
+                                    .disabled(pdf.page_index + 1 >= pdf.page_count || self.pdf_loading)
+                                    .on_click(cx.listener(move |preview, _, _, cx| {
+                                        preview.show_pdf_page(next_page, cx);
+                                    })),
+                            )
+                    })
                     .child(
                         Button::new("copy-text-preview")
                             .ghost()
@@ -817,6 +1064,176 @@ impl Render for Preview {
                             }),
                     )
                 })
+                .when(message.is_none() && !self.editing && self.image.is_some(), |panel| {
+                    panel.child(
+                        div()
+                            .id("image-preview")
+                            .debug_selector(|| "image-preview".to_owned())
+                            .flex()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .min_h(px(0.0))
+                            .items_center()
+                            .justify_center()
+                            .overflow_hidden()
+                            .child(
+                                img(self.image.as_ref().unwrap().clone())
+                                    .size_full()
+                                    .object_fit(gpui::ObjectFit::Contain),
+                            ),
+                    )
+                })
+                .when(message.is_none() && !self.editing && self.pdf.is_some(), |panel| {
+                    let pdf = self.pdf.as_ref().unwrap();
+                    panel.child(
+                        div()
+                            .id("pdf-preview")
+                            .debug_selector(|| "pdf-preview".to_owned())
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .min_h(px(0.0))
+                            .overflow_y_scroll()
+                            .track_scroll(&self.pdf_scroll)
+                            .bg(rgb(theme.sidebar))
+                            .child(
+                                div()
+                                    .id("pdf-page-image")
+                                    .debug_selector(|| "pdf-page-image".to_owned())
+                                    .flex()
+                                    .flex_shrink_0()
+                                    .w_full()
+                                    .child(
+                                        img(pdf.image.clone())
+                                            .w_full()
+                                            .object_fit(gpui::ObjectFit::Contain),
+                                    ),
+                            )
+                            .child(
+                                gpui::component::scroll::Scrollbar::vertical(&self.pdf_scroll)
+                                    .id("pdf-preview-scrollbar")
+                                    .mode(gpui::component::scroll::ScrollbarMode::Always),
+                            ),
+                    )
+                })
+                .when(message.is_none() && self.media.is_some(), |panel| {
+                    let media = self.media.as_ref().unwrap();
+                    panel
+                        .when(media.kind == MediaKind::Video, |panel| {
+                            panel.child(
+                                div()
+                                    .id("video-player")
+                                    .debug_selector(|| "video-player".to_owned())
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_h(px(0.0))
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .id("video-canvas")
+                                            .debug_selector(|| "video-canvas".to_owned())
+                                            .flex()
+                                            .flex_1()
+                                            .min_h(px(0.0))
+                                            .items_center()
+                                            .justify_center()
+                                            .overflow_hidden()
+                                            .bg(rgb(0x000000))
+                                            .when_some(self.video_frame.clone(), |canvas, frame| {
+                                                canvas.child(
+                                                    img(frame)
+                                                        .size_full()
+                                                        .object_fit(gpui::ObjectFit::Contain),
+                                                )
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .px_3()
+                                            .py_2()
+                                            .border_t_1()
+                                            .border_color(rgb(theme.border))
+                                            .child(
+                                                Button::new("play-video")
+                                                    .debug_selector(|| "play-video".to_owned())
+                                                    .secondary()
+                                                    .small()
+                                                    .icon(if self.video_playing {
+                                                        gpui::assets::IconName::Pause
+                                                    } else {
+                                                        gpui::assets::IconName::Play
+                                                    })
+                                                    .label(language.text(if self.video_playing {
+                                                        "Stop video"
+                                                    } else {
+                                                        "Play video"
+                                                    }))
+                                                    .on_click(cx.listener(|preview, _, window, cx| {
+                                                        preview.toggle_video_playback(window, cx);
+                                                    })),
+                                            )
+                                            .child(div().flex_1())
+                                            .child(
+                                                Button::new("open-video-default-app")
+                                                    .debug_selector(|| "open-video-default-app".to_owned())
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .icon(gpui::assets::IconName::ExternalLink)
+                                                    .tooltip(language.text("Open with default app"))
+                                                    .accessibility_label(language.text("Open with default app"))
+                                                    .on_click(cx.listener(|preview, _, _, cx| {
+                                                        let target = preview.target.clone();
+                                                        let _ = preview.manager.update(cx, |manager, cx| {
+                                                            manager.open_entry(&target, cx);
+                                                        });
+                                                    })),
+                                            ),
+                                    ),
+                            )
+                        })
+                        .when(media.kind == MediaKind::Audio, |panel| {
+                            panel.child(
+                                div()
+                                    .id("media-preview")
+                                    .debug_selector(|| "media-preview".to_owned())
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .min_h(px(0.0))
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_2()
+                                    .p_4()
+                                    .children(media.details().into_iter().map(|(label, value)| {
+                                        div()
+                                            .flex()
+                                            .gap_2()
+                                            .max_w_full()
+                                            .child(div().text_color(rgb(theme.muted_text)).child(language.text(label).to_owned()))
+                                            .child(div().text_color(rgb(theme.text)).child(value.to_owned()))
+                                    }))
+                                    .child(
+                                        Button::new("open-media-default-app")
+                                            .debug_selector(|| "open-media-default-app".to_owned())
+                                            .secondary()
+                                            .small()
+                                            .icon(gpui::assets::IconName::ExternalLink)
+                                            .label(language.text("Open with default app"))
+                                            .on_click(cx.listener(|preview, _, _, cx| {
+                                                let target = preview.target.clone();
+                                                let _ = preview.manager.update(cx, |manager, cx| {
+                                                    manager.open_entry(&target, cx);
+                                                });
+                                            })),
+                                    ),
+                            )
+                        })
+                })
                 .when(message.is_none() && !self.editing && self.hex.is_some(), |panel| {
                 let hex = self.hex.as_ref().unwrap();
                 panel.child(
@@ -931,7 +1348,7 @@ impl Render for Preview {
                                 .track_scroll(&self.scroll).flex_1().min_h(px(0.0)).w_full()))
                 )
             })
-            .when(message.is_none() && !self.editing && self.csv.is_none() && self.hex.is_none(), |panel| {
+                .when(message.is_none() && !self.editing && self.csv.is_none() && self.hex.is_none() && self.image.is_none() && self.pdf.is_none() && self.media.is_none(), |panel| {
                 panel.child(
                     div()
                         .id("text-preview-editor")
@@ -1010,7 +1427,275 @@ mod tests {
     fn load_text_preview(target: &EntryTarget, cancel: &AtomicBool) -> TextContent {
         match load(target, cancel).unwrap() {
             PreviewData::Text(content) => content,
-            PreviewData::Binary(_) => panic!("expected text preview"),
+            PreviewData::Binary(_) | PreviewData::Image(_) | PreviewData::Pdf(_) | PreviewData::Media(_) => {
+                panic!("expected text preview")
+            }
+        }
+    }
+
+    #[test]
+    fn image_preview_decodes_photos_and_animated_gifs() {
+        use image::{Delay, Frame, Rgba, RgbaImage};
+        use std::{fs::File, path::PathBuf};
+
+        let directory = tempfile::tempdir().unwrap();
+        let png_path = directory.path().join("photo.png");
+        RgbaImage::from_pixel(8, 6, Rgba([20, 80, 140, 255]))
+            .save(&png_path)
+            .unwrap();
+        let png_target = EntryTarget {
+            name: "photo.png".into(),
+            key: png_path.to_string_lossy().into_owned(),
+            path: png_path,
+            archive_entry: None,
+            password: None,
+            is_directory: false,
+        };
+        let cancel = AtomicBool::new(false);
+        let loaded = load(&png_target, &cancel).unwrap();
+        let PreviewData::Image(image) = loaded else {
+            panic!("expected image preview");
+        };
+        assert_eq!(image.frame_count(), 1);
+        assert_eq!(image.size(0).width.0, 8);
+        assert_eq!(image.size(0).height.0, 6);
+
+        let gif_path = directory.path().join("animation.gif");
+        let frames = [
+            Frame::from_parts(
+                RgbaImage::from_pixel(4, 4, Rgba([255, 0, 0, 255])),
+                0,
+                0,
+                Delay::from_numer_denom_ms(100, 1),
+            ),
+            Frame::from_parts(
+                RgbaImage::from_pixel(4, 4, Rgba([0, 0, 255, 255])),
+                0,
+                0,
+                Delay::from_numer_denom_ms(100, 1),
+            ),
+        ];
+        let gif_file = File::create(&gif_path).unwrap();
+        image::codecs::gif::GifEncoder::new(gif_file)
+            .encode_frames(frames)
+            .unwrap();
+        let gif_target = EntryTarget {
+            name: "animation.gif".into(),
+            key: gif_path.to_string_lossy().into_owned(),
+            path: PathBuf::from(gif_path),
+            archive_entry: None,
+            password: None,
+            is_directory: false,
+        };
+        let loaded = load(&gif_target, &cancel).unwrap();
+        let PreviewData::Image(image) = loaded else {
+            panic!("expected animated image preview");
+        };
+        assert_eq!(image.frame_count(), 2);
+    }
+
+    #[gpui::test]
+    fn image_files_render_in_the_inspector_preview(cx: &mut gpui::TestAppContext) {
+        use image::{Rgba, RgbaImage};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("preview.png");
+        RgbaImage::from_pixel(32, 24, Rgba([40, 100, 180, 255]))
+            .save(&path)
+            .unwrap();
+        let target = EntryTarget {
+            name: "preview.png".into(),
+            key: path.to_string_lossy().into_owned(),
+            path,
+            archive_entry: None,
+            password: None,
+            is_directory: false,
+        };
+        let (view, cx) = crate::tests::component_window(cx, |_, cx| crate::tests::test_manager(cx));
+        cx.update(|window, cx| {
+            view.update(cx, |manager, cx| manager.preview_text_target(&target, window, cx));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("image-preview").is_some());
+        assert!(cx.debug_bounds("text-preview-editor").is_none());
+    }
+
+    #[gpui::test]
+    fn media_preview_offers_video_player_and_audio_default_app(cx: &mut gpui::TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("video.mp4");
+        std::fs::write(&path, b"unavailable video metadata fixture").unwrap();
+        let target = EntryTarget {
+            name: "video.mp4".into(),
+            key: path.to_string_lossy().into_owned(),
+            path,
+            archive_entry: None,
+            password: None,
+            is_directory: false,
+        };
+        let (view, cx) = crate::tests::component_window(cx, |_, cx| crate::tests::test_manager(cx));
+        cx.update(|window, cx| {
+            view.update(cx, |manager, cx| manager.preview_text_target(&target, window, cx));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("video-player").is_some());
+        assert!(cx.debug_bounds("video-canvas").is_some());
+        assert!(cx.debug_bounds("play-video").is_some());
+        assert!(cx.debug_bounds("open-media-default-app").is_none());
+        assert!(cx.debug_bounds("open-video-default-app").is_some());
+        assert!(cx.debug_bounds("text-preview-editor").is_none());
+
+        let path = directory.path().join("audio.mp3");
+        std::fs::write(&path, b"unavailable audio metadata fixture").unwrap();
+        let target = EntryTarget {
+            name: "audio.mp3".into(),
+            key: path.to_string_lossy().into_owned(),
+            path,
+            archive_entry: None,
+            password: None,
+            is_directory: false,
+        };
+        cx.update(|window, cx| {
+            view.update(cx, |manager, cx| manager.preview_text_target(&target, window, cx));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("media-preview").is_some());
+        assert!(cx.debug_bounds("open-media-default-app").is_some());
+        assert!(cx.debug_bounds("play-video").is_none());
+    }
+
+    #[test]
+    fn ffmpeg_video_decoder_streams_frames_when_tools_are_available() {
+        let Some(ffmpeg) = video_tool("ffmpeg") else { return };
+        if video_tool("ffprobe").is_none() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sample.mp4");
+        let output = std::process::Command::new(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=64x48:r=12:d=0.25",
+                "-c:v",
+                "mpeg4",
+                "-an",
+                "-y",
+            ])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let target = EntryTarget {
+            name: "sample.mp4".into(),
+            key: path.to_string_lossy().into_owned(),
+            path,
+            archive_entry: None,
+            password: None,
+            is_directory: false,
+        };
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let processes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let worker = std::thread::spawn(move || decode_video_stream(target, worker_cancel, sender, processes));
+        let mut frame_count = 0;
+        loop {
+            match receiver.recv_timeout(std::time::Duration::from_secs(10)) {
+                Ok(VideoMessage::Frame(frame)) => {
+                    frame_count += 1;
+                    assert_eq!(frame.frame_count(), 1);
+                }
+                Ok(VideoMessage::Finished) => break,
+                Ok(VideoMessage::Failed(error)) => panic!("{error}"),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("video decode timed out"),
+            }
+        }
+        worker.join().unwrap().unwrap();
+        assert!(frame_count > 0);
+    }
+
+    fn minimal_pdf(text: &str) -> Vec<u8> {
+        use std::io::Write;
+
+        let stream = format!("BT /F1 14 Tf 10 30 Td ({text}) Tj ET");
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 6 0 R >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 7 0 R >>".to_owned(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
+            format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
+        ];
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = vec![0usize];
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            write!(pdf, "{} 0 obj\n{object}\nendobj\n", index + 1).unwrap();
+        }
+        let xref = pdf.len();
+        write!(pdf, "xref\n0 {}\n0000000000 65535 f \n", offsets.len()).unwrap();
+        for offset in offsets.iter().skip(1) {
+            write!(pdf, "{offset:010} 00000 n \n").unwrap();
+        }
+        write!(
+            pdf,
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            offsets.len()
+        )
+        .unwrap();
+        pdf
+    }
+
+    #[test]
+    fn pdf_preview_renders_pages_and_audio_video_use_metadata_cards() {
+        let directory = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let pdf_path = directory.path().join("document.pdf");
+        std::fs::write(&pdf_path, minimal_pdf("Rendered PDF page")).unwrap();
+        let pdf_target = EntryTarget {
+            name: "document.pdf".into(),
+            key: pdf_path.to_string_lossy().into_owned(),
+            path: pdf_path,
+            archive_entry: None,
+            password: None,
+            is_directory: false,
+        };
+        let loaded = load(&pdf_target, &cancel).unwrap();
+        let PreviewData::Pdf(pdf) = loaded else {
+            panic!("expected a rendered PDF preview");
+        };
+        assert_eq!(pdf.page_index, 0);
+        assert_eq!(pdf.page_count, 2);
+        let next_page = render_pdf_page(pdf.bytes.clone(), 1).unwrap();
+        assert_eq!(next_page.page_index, 1);
+        assert_eq!(next_page.page_count, 2);
+
+        for (extension, expected_kind) in [
+            ("mp3", MediaKind::Audio),
+            ("mp4", MediaKind::Video),
+        ] {
+            let path = directory.path().join(format!("sample.{extension}"));
+            std::fs::write(&path, b"not a decodable media stream").unwrap();
+            let target = EntryTarget {
+                name: format!("sample.{extension}"),
+                key: path.to_string_lossy().into_owned(),
+                path,
+                archive_entry: None,
+                password: None,
+                is_directory: false,
+            };
+            let loaded = load(&target, &cancel).unwrap();
+            let PreviewData::Media(media) = loaded else {
+                panic!("expected a media information preview");
+            };
+            assert_eq!(media.kind, expected_kind);
         }
     }
 
@@ -1063,6 +1748,42 @@ mod tests {
             });
             assert!(cx.debug_bounds("text-preview-editor").is_some());
         }
+    }
+
+    #[gpui::test]
+    fn pdf_pages_render_in_the_inspector_with_navigation(cx: &mut gpui::TestAppContext) {
+        use gpui::test::TestWindowExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("document.pdf");
+        std::fs::write(&path, minimal_pdf("Rendered PDF page")).unwrap();
+        let target = EntryTarget {
+            name: "document.pdf".into(),
+            key: path.to_string_lossy().into_owned(),
+            path,
+            archive_entry: None,
+            password: None,
+            is_directory: false,
+        };
+        let (view, cx) = crate::tests::component_window(cx, |_, cx| crate::tests::test_manager(cx));
+        cx.update(|window, cx| {
+            view.update(cx, |manager, cx| manager.preview_text_target(&target, window, cx));
+        });
+        cx.run_until_parked();
+        let inspector = cx.debug_bounds("archive-inspector").unwrap();
+        let preview_bounds = cx.debug_bounds("text-preview").unwrap();
+        assert!(preview_bounds.size.height >= inspector.size.height - px(40.0));
+        let viewport = cx.debug_bounds("pdf-preview").unwrap();
+        assert!(cx.debug_bounds("text-preview-editor").is_none());
+        assert!(viewport.size.height > px(150.0));
+        let page = cx.debug_bounds("pdf-page-image").unwrap();
+        assert!(page.size.width >= viewport.size.width * 0.9);
+        assert!(page.size.height > viewport.size.height);
+        assert!(cx.debug_bounds("pdf-page-indicator").is_some());
+        assert!(cx.debug_bounds("next-pdf-page").is_some());
+        cx.update(|window, cx| window.click("next-pdf-page", cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pdf-page-image").unwrap().size.height > viewport.size.height);
     }
 
     #[test]

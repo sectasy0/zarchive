@@ -136,7 +136,7 @@ impl ArchiveManager {
             return;
         }
         if let Some(target) = self.selected_browser_target() {
-            let same_target = if let Some(preview) = &self.inspector.text_preview {
+            let same_target = if let Some(preview) = &self.inspector.preview {
                 preview.read(cx).matches_target(&target)
             } else {
                 target.archive_entry.is_none()

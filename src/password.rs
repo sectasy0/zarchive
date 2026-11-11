@@ -75,7 +75,7 @@ impl ArchiveManager {
         self.navigation_control.cancel();
         self.navigation_revision = self.navigation_revision.wrapping_add(1);
         self.cancel_directory_size_calculation();
-        self.inspector.clear_text_preview();
+        self.inspector.clear_preview();
         self.directory_sizes = None;
         self.current_directory = None;
         self.directory_history.clear();

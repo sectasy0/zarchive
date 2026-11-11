@@ -62,7 +62,7 @@ pub struct InspectorSession {
     pub selected_name: Option<String>,
     /// Whether a batch request was truncated to its inspection limit.
     pub batch_limited: bool,
-    pub(crate) text_preview: Option<gpui::Entity<crate::text_preview::Preview>>,
+    pub(crate) preview: Option<gpui::Entity<crate::preview::Preview>>,
     pub(crate) text_cancel: Arc<AtomicBool>,
     passwords: std::collections::BTreeMap<PathBuf, Option<ArchivePassword>>,
     entries_view: Option<gpui::Entity<EntryPane>>,
@@ -85,7 +85,7 @@ impl Default for InspectorSession {
             active: 0,
             selected_name: None,
             batch_limited: false,
-            text_preview: None,
+            preview: None,
             text_cancel: Arc::new(AtomicBool::new(false)),
             passwords: std::collections::BTreeMap::new(),
             entries_view: None,
@@ -134,7 +134,7 @@ impl Inspector {
         let index = existing.unwrap_or_else(|| {
             let active_is_empty = self.sessions[self.active_session].source.is_none()
                 && self.sessions[self.active_session].reports.is_empty()
-                && self.sessions[self.active_session].text_preview.is_none();
+                && self.sessions[self.active_session].preview.is_none();
             if active_is_empty {
                 self.active_session
             } else {
@@ -208,13 +208,13 @@ impl Inspector {
     #[cfg(test)]
     pub(crate) fn test_has_preview_for(&self, source: &Path) -> bool {
         self.sessions.iter().any(|session| {
-            session.source.as_deref() == Some(source) && session.text_preview.is_some()
+            session.source.as_deref() == Some(source) && session.preview.is_some()
         })
     }
 
     fn reset_active(&mut self) {
         self.passwords.clear();
-        self.clear_text_preview();
+        self.clear_preview();
         self.text_cancel = Arc::new(AtomicBool::new(false));
         self.cancel.store(true, Ordering::Relaxed);
         self.cancel = Arc::new(AtomicBool::new(false));
@@ -233,9 +233,9 @@ impl Inspector {
         self.height.unwrap_or((window_height * 0.4).min(px(258.0))).clamp(px(80.0), maximum)
     }
 
-    pub(crate) fn clear_text_preview(&mut self) {
+    pub(crate) fn clear_preview(&mut self) {
         self.text_cancel.store(true, Ordering::Relaxed);
-        self.text_preview = None;
+        self.preview = None;
     }
 
     /// Reports whether an inspection task is still running.
@@ -246,7 +246,7 @@ impl Inspector {
     /// Cancels pending inspection work and clears panel-local state.
     pub fn close(&mut self) {
         self.passwords.clear();
-        self.clear_text_preview();
+        self.clear_preview();
         self.cancel.store(true, Ordering::Relaxed);
         self.task = None;
         self.entries_view = None;
@@ -334,10 +334,10 @@ impl ArchiveManager {
             || !crate::archive::is_supported_archive(&target.path)
             || crate::archive::ResolvedFormat::from_file(&target.path).is_some_and(|format| format.is_single_compressed()))
         {
-            self.preview_text_target(target, window, cx);
+            self.preview_target(target, window, cx);
             return;
         }
-        self.inspector.clear_text_preview();
+        self.inspector.clear_preview();
         if target.archive_entry.is_some() {
             if self
                 .inspector
@@ -1485,7 +1485,7 @@ mod tests {
             archive_entry: None, password: None, is_directory: false };
         let (view, cx) = crate::tests::component_window(cx, |_, cx| crate::tests::test_manager(cx));
         cx.simulate_resize(gpui::size(px(1100.0), px(720.0)));
-        cx.update(|window, cx| view.update(cx, |manager, cx| manager.preview_text_target(&target, window, cx)));
+        cx.update(|window, cx| view.update(cx, |manager, cx| manager.preview_target(&target, window, cx)));
         cx.run_until_parked();
         assert_eq!(cx.debug_bounds("resizable-preview").unwrap().size.height, px(258.0));
         drag_to(cx, px(360.0));
@@ -1494,7 +1494,7 @@ mod tests {
         let csv_path = directory.path().join("preview.csv");
         std::fs::write(&csv_path, "name,value\nitem,42\n").unwrap();
         let csv_target = EntryTarget { name: "preview.csv".into(), path: csv_path, ..target.clone() };
-        cx.update(|window, cx| view.update(cx, |manager, cx| manager.preview_text_target(&csv_target, window, cx)));
+        cx.update(|window, cx| view.update(cx, |manager, cx| manager.preview_target(&csv_target, window, cx)));
         cx.run_until_parked();
         assert_eq!(cx.debug_bounds("resizable-preview").unwrap().size.height, px(360.0));
         assert!(cx.debug_bounds("csv-preview-table").is_some());
@@ -1505,7 +1505,7 @@ mod tests {
         assert_eq!(cx.debug_bounds("resizable-preview").unwrap().size.height, px(80.0));
         view.update(cx, |manager, cx| { manager.inspector.close(); cx.notify(); });
         cx.run_until_parked();
-        cx.update(|window, cx| view.update(cx, |manager, cx| manager.preview_text_target(&target, window, cx)));
+        cx.update(|window, cx| view.update(cx, |manager, cx| manager.preview_target(&target, window, cx)));
         cx.run_until_parked();
         assert_eq!(cx.debug_bounds("resizable-preview").unwrap().size.height, px(80.0));
     }
@@ -2381,7 +2381,7 @@ pub fn view(
     cx: &mut Context<ArchiveManager>,
 ) -> impl IntoElement {
     let language = manager.language;
-    if let Some(preview) = manager.inspector.text_preview.clone() {
+    if let Some(preview) = manager.inspector.preview.clone() {
         preview.update(cx, |preview, cx| {
             if preview.theme.window != theme.window || preview.theme.accent != theme.accent || preview.language != manager.language {
                 preview.theme = theme;
@@ -2394,7 +2394,15 @@ pub fn view(
             .h(height).min_h(px(0.0)).flex_shrink_0()
             .border_t_1().border_color(rgb(theme.border))
             .child(target_tabs(manager, language, theme, cx))
-            .child(preview)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_hidden()
+                    .child(preview),
+            )
             .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| {
                 if !this.inspector_focus {
                     this.inspector_focus = true;

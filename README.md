@@ -52,6 +52,12 @@ available while your files are processed.
   CSV files, use a virtualized table with a fixed header and horizontal scrolling.
   Commas, semicolons, tabs, quoted fields, and multiline values are supported.
   Table previews are limited to 5,000 rows and 64 columns.
+- **Preview images and media.** Common raster formats and animated GIFs render
+  in the inspector. PDFs render one page at a time with page navigation. Audio
+  files show available metadata and can be opened in the system's default
+  application. Video files play in the inspector using FFmpeg, with FFplay
+  providing audio when available; videos can also be opened in the system's
+  default application.
 - **Search inside archives.** The toolbar search also checks files inside archives
   in the current disk folder, without opening each archive first. Scanning runs
   in the background, and results identify both the archive and the entry path.
@@ -163,7 +169,8 @@ available while your files are processed.
   filesystem items between folders or send them to Trash; existing destinations
   are never overwritten.
 - **Make it your workspace.** Choose a light, dark, or system theme, an accent
-  color, one of six interface languages, and a default startup folder. Folder
+  color, any font family installed on your system, one of six interface
+  languages, and a default startup folder. Folder
   sizes are calculated automatically by default, with an option to turn that
   background work off. **Settings > Keyboard** lets you record, disable, and
   reset shortcuts for file opening, archive creation, extraction, integrity

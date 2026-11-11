@@ -69,7 +69,6 @@ fn about_app_icon() -> impl IntoElement {
         .child(img(image).size_full().object_fit(gpui::ObjectFit::Fill))
 }
 
-/// Creates a compact selectable button for a theme-mode option.
 fn setting_option(id: &'static str, label: &'static str, selected: bool, theme: Theme) -> Button {
     Button::new(id)
         .ghost()
@@ -1149,6 +1148,14 @@ fn settings_view(
                                     ),
                                 ),
                         ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(language.text("Font"))
+                        .child(crate::ui::select(manager, crate::ui::Selector::Font)),
                 )
                 .child(
                     div()

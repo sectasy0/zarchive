@@ -24,7 +24,7 @@ mod secret;
 mod security;
 mod archive_signature;
 mod toolbar;
-mod text_preview;
+mod preview;
 mod task_queue;
 mod transfer;
 mod ui;
@@ -42,7 +42,7 @@ use gpui::{
 };
 use i18n::Language;
 use icons::IconAssets;
-pub(crate) use preferences::{AccentColor, AdvancedSettings, ThemeMode, UserPreferences};
+pub(crate) use preferences::{AccentColor, AdvancedSettings, SYSTEM_UI_FONT, ThemeMode, UserPreferences};
 use preferences::{load_user_preferences, user_preferences_path};
 use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
@@ -202,6 +202,8 @@ struct ArchiveManager {
     language: Language,
     theme_mode: ThemeMode,
     accent_color: AccentColor,
+    ui_font: String,
+    font_families: std::sync::Arc<Vec<String>>,
     default_location: Option<PathBuf>,
     favorite_folders: Vec<PathBuf>,
     recent_folders: Vec<PathBuf>,
@@ -554,6 +556,7 @@ impl ArchiveManager {
             language: self.language,
             theme_mode: self.theme_mode,
             accent_color: self.accent_color,
+            ui_font: self.ui_font.clone(),
             default_location: self.default_location.clone(),
             favorite_folders: self.favorite_folders.clone(),
             auto_calculate_folder_sizes: self.auto_calculate_folder_sizes,
@@ -793,7 +796,7 @@ impl ArchiveManager {
         self.navigation_control.cancel();
         self.navigation_revision = self.navigation_revision.wrapping_add(1);
         self.cancel_directory_size_calculation();
-        self.inspector.clear_text_preview();
+        self.inspector.clear_preview();
         self.directory_sizes = None;
         self.current_directory = Some(path);
         self.archive_path = None;
@@ -970,7 +973,7 @@ impl ArchiveManager {
 
 /// Loads startup state and launches the GPUI archive manager window.
 fn main() {
-    let preferences = load_user_preferences();
+    let mut preferences = load_user_preferences();
     let startup_path = std::env::args_os().nth(1).map(PathBuf::from);
     let startup_is_archive = startup_path.as_deref().is_some_and(is_supported_archive);
     let mut startup_requires_password = false;
@@ -1052,6 +1055,16 @@ fn main() {
         .with_assets(IconAssets)
         .run(move |cx: &mut App| {
             gpui::init(cx);
+            let mut font_families = cx.text_system().all_font_names();
+            font_families.retain(|family| !family.is_empty() && family != SYSTEM_UI_FONT);
+            font_families.sort_by_key(|family| family.to_lowercase());
+            font_families.dedup();
+            if preferences.ui_font != SYSTEM_UI_FONT
+                && !font_families.iter().any(|family| family == &preferences.ui_font)
+            {
+                preferences.ui_font = SYSTEM_UI_FONT.to_owned();
+            }
+            let font_families = std::sync::Arc::new(font_families);
             preferences.shortcuts.install(false, cx);
             let default_size = size(px(1100.0), px(720.0));
             let bounds = Bounds::centered(None, default_size, cx);
@@ -1118,6 +1131,8 @@ fn main() {
                             language: preferences.language,
                             theme_mode: preferences.theme_mode,
                             accent_color: preferences.accent_color,
+                            ui_font: preferences.ui_font.clone(),
+                            font_families: font_families.clone(),
                             default_location: preferences.default_location.clone(),
                             favorite_folders: preferences.favorite_folders.clone(),
                             recent_folders,
@@ -1478,7 +1493,7 @@ mod tests {
     pub(crate) fn test_manager(
         cx: &mut gpui::Context<super::ArchiveManager>,
     ) -> super::ArchiveManager {
-        use super::{AccentColor, ArchiveManager, Language, ThemeMode};
+        use super::{AccentColor, ArchiveManager, Language, ThemeMode, SYSTEM_UI_FONT};
         let browsers = super::two_browser_panes(
             Some(std::path::PathBuf::from("/test")),
             None,
@@ -1504,6 +1519,8 @@ mod tests {
             language: Language::English,
             theme_mode: ThemeMode::System,
             accent_color: AccentColor::Blue,
+            ui_font: SYSTEM_UI_FONT.to_owned(),
+            font_families: std::sync::Arc::new(cx.text_system().all_font_names()),
             default_location: None,
             favorite_folders: Vec::new(),
             recent_folders: Vec::new(),

@@ -26,6 +26,8 @@ pub enum Selector {
     CompressionFormat,
     /// 7z dictionary-size selector.
     Dictionary,
+    /// Installed system font family selector.
+    Font,
     VolumeSize,
     VolumeUnit,
     RecoveryPercent,
@@ -76,13 +78,73 @@ fn format_index_path(index: usize) -> Option<IndexPath> {
 /// Owns retained controls and synchronization state for modals and global themes.
 pub struct Controls {
     selects: BTreeMap<Selector, SelectControl>,
+    font_options_language: Option<Language>,
     modal: Option<crate::Modal>,
     dark: Option<bool>,
     accent_color: Option<crate::AccentColor>,
+    font: Option<String>,
     language: Option<Language>,
 }
 
 impl Controls {
+    fn sync_font(
+        &mut self,
+        language: Language,
+        families: &[String],
+        selected_family: &str,
+        window: &mut Window,
+        cx: &mut Context<ArchiveManager>,
+    ) {
+        if self.font_options_language == Some(language)
+            && let Some(control) = self.selects.get_mut(&Selector::Font)
+        {
+            let selected = if selected_family == crate::SYSTEM_UI_FONT {
+                0
+            } else {
+                control
+                    .items
+                    .iter()
+                    .position(|family| family.as_ref() == selected_family)
+                    .unwrap_or(0)
+            };
+            if control.selected != selected {
+                let SelectStateHandle::Flat(state) = &control.state else {
+                    unreachable!("font selector must use a flat list")
+                };
+                state.update(cx, |state, cx| {
+                    state.set_selected_index(Some(IndexPath::new(selected)), window, cx);
+                });
+                control.selected = selected;
+            }
+            return;
+        }
+        let items: Vec<SharedString> = std::iter::once(language.text("System default").into())
+            .chain(families.iter().cloned().map(SharedString::from))
+            .collect();
+        let selected = if selected_family == crate::SYSTEM_UI_FONT {
+            0
+        } else {
+            items
+                .iter()
+                .position(|family| family.as_ref() == selected_family)
+                .unwrap_or(0)
+        };
+        if let Some(control) = self.selects.get_mut(&Selector::Font) {
+            let SelectStateHandle::Flat(state) = &control.state else {
+                unreachable!("font selector must use a flat list")
+            };
+            state.update(cx, |state, cx| {
+                state.set_items(items.clone(), window, cx);
+                state.set_selected_index(Some(IndexPath::new(selected)), window, cx);
+            });
+            control.items = items;
+            control.selected = selected;
+        } else {
+            self.sync(Selector::Font, items, selected, window, cx);
+        }
+        self.font_options_language = Some(language);
+    }
+
     /// Creates a selector once, then updates its options and selection as needed.
     fn sync(
         &mut self,
@@ -108,8 +170,10 @@ impl Controls {
             }
             return;
         }
-        let state = cx
-            .new(|cx| SelectState::new(items.clone(), Some(IndexPath::new(selected)), window, cx));
+        let state = cx.new(|cx| {
+            SelectState::new(items.clone(), Some(IndexPath::new(selected)), window, cx)
+                .searchable(selector == Selector::Font)
+        });
         let subscription = cx.subscribe_in(
             &state,
             window,
@@ -126,6 +190,14 @@ impl Controls {
                         Selector::Language => {
                             this.language = Language::ALL[index];
                             this.status_message = None;
+                            this.save_preferences();
+                        }
+                        Selector::Font => {
+                            this.ui_font = if index == 0 {
+                                crate::SYSTEM_UI_FONT.to_owned()
+                            } else {
+                                value.to_string()
+                            };
                             this.save_preferences();
                         }
                         Selector::Format => this.creation.apply(ChoiceField::Format, index),
@@ -264,6 +336,7 @@ pub fn prepare(
     let dark = manager.theme_mode.is_dark(window.appearance());
     let dark_changed = manager.controls.dark != Some(dark);
     let accent_changed = manager.controls.accent_color != Some(manager.accent_color);
+    let font_changed = manager.controls.font.as_deref() != Some(manager.ui_font.as_str());
     if dark_changed {
         gpui::component::Theme::change(
             if dark {
@@ -275,9 +348,13 @@ pub fn prepare(
             cx,
         );
     }
-    if dark_changed || accent_changed {
+    if dark_changed || accent_changed || font_changed {
         let palette = crate::Theme::new(dark).with_accent(manager.accent_color.color(dark));
+        let font_family = manager.ui_font.clone();
         gpui::component::Theme::update(cx, |theme| {
+            if dark_changed || font_changed {
+                theme.font_family = font_family.into();
+            }
             let primary: gpui::Hsla = gpui::rgb(palette.accent).into();
             let foreground = gpui::rgb(if dark { 0x111820 } else { 0xffffff }).into();
             let hover = gpui::Hsla {
@@ -321,6 +398,17 @@ pub fn prepare(
         });
         manager.controls.dark = Some(dark);
         manager.controls.accent_color = Some(manager.accent_color);
+        manager.controls.font = Some(manager.ui_font.clone());
+    }
+    if manager.modal == Some(crate::Modal::Settings)
+        && manager.settings_category == crate::SettingsCategory::Appearance
+    {
+        let language = manager.language;
+        let families = manager.font_families.clone();
+        let selected_family = manager.ui_font.clone();
+        manager
+            .controls
+            .sync_font(language, &families, &selected_family, window, cx);
     }
     if manager.controls.modal != manager.modal {
         if manager.controls.modal.is_some() {
@@ -424,6 +512,7 @@ pub fn select(manager: &ArchiveManager, selector: Selector) -> impl IntoElement 
         Selector::Compression => ("creation-compression", "Compression"),
         Selector::CompressionFormat => ("creation-tar-compression", "Compression method"),
         Selector::Dictionary => ("creation-dictionary", "Dictionary size"),
+        Selector::Font => ("font-select", "Font"),
         Selector::VolumeSize => ("creation-volume-size", "Volume size"),
         Selector::VolumeUnit => ("creation-volume-unit", "Size unit"),
         Selector::RecoveryPercent => ("creation-parity-percent", "Recovery data"),
@@ -434,6 +523,7 @@ pub fn select(manager: &ArchiveManager, selector: Selector) -> impl IntoElement 
             .id("control")
             .small()
             .w_full()
+            .search_placeholder(manager.language.text("Search fonts"))
             .accessibility_label(manager.language.text(label))
             .disabled(control.items.len() < 2)
             .into_any_element(),
@@ -769,9 +859,13 @@ mod tests {
     ) {
         use gpui::test::TestWindowExt;
 
+        let directory = tempfile::tempdir().unwrap();
+        let settings_path = directory.path().join("settings.json");
         let (view, cx) = crate::tests::component_window(cx, |window, cx| {
             let mut manager = crate::tests::test_manager(cx);
             manager.current_directory = None;
+            manager.preferences_path = Some(settings_path.clone());
+            manager.font_families = std::sync::Arc::new(vec!["Test Font".to_owned()]);
             manager.show_modal(crate::Modal::Settings, window, cx);
             manager
         });
@@ -826,6 +920,34 @@ mod tests {
             assert_eq!(manager.theme_mode, crate::ThemeMode::Dark);
             assert_eq!(manager.controls.dark, Some(true));
             assert_eq!(manager.entries.len(), 4);
+        });
+        let expected_font = "Test Font".to_owned();
+        let font_select_bounds = cx.debug_bounds("font-select").unwrap();
+        cx.simulate_mouse_move(font_select_bounds.center(), None, Modifiers::default());
+        cx.simulate_click(font_select_bounds.center(), Modifiers::default());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("down enter");
+        cx.run_until_parked();
+        cx.read(|cx| {
+            let manager = view.read(cx);
+            assert_eq!(manager.ui_font, expected_font);
+            assert_eq!(manager.controls.font.as_deref(), Some(expected_font.as_str()));
+            assert_eq!(
+                gpui::component::Theme::global(cx).font_family.as_ref(),
+                expected_font
+            );
+        });
+        assert_eq!(
+            crate::UserPreferences::load(&settings_path).ui_font,
+            expected_font
+        );
+        cx.update(|window, cx| window.click("theme-light", cx));
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert_eq!(
+                gpui::component::Theme::global(cx).font_family.as_ref(),
+                expected_font
+            );
         });
     }
 }

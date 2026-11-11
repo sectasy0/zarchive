@@ -106,6 +106,8 @@ impl AccentColor {
     }
 }
 
+pub(crate) const SYSTEM_UI_FONT: &str = ".SystemUIFont";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Resource limits that can be adjusted in Advanced settings.
 pub(crate) struct AdvancedSettings {
@@ -157,6 +159,8 @@ pub(crate) struct UserPreferences {
     pub(crate) theme_mode: ThemeMode,
     /// Selected interface accent.
     pub(crate) accent_color: AccentColor,
+    /// Selected interface font family.
+    pub(crate) ui_font: String,
     /// Optional startup directory override.
     pub(crate) default_location: Option<PathBuf>,
     /// User-pinned filesystem directories shown in the sidebar.
@@ -175,6 +179,7 @@ impl Default for UserPreferences {
             language: Language::default(),
             theme_mode: ThemeMode::default(),
             accent_color: AccentColor::default(),
+            ui_font: SYSTEM_UI_FONT.to_owned(),
             default_location: None,
             favorite_folders: Vec::new(),
             auto_calculate_folder_sizes: true,
@@ -215,6 +220,12 @@ impl UserPreferences {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("blue"),
             ),
+            ui_font: value
+                .get("font")
+                .and_then(serde_json::Value::as_str)
+                .filter(|font| !font.is_empty() && font.len() <= 256)
+                .unwrap_or(SYSTEM_UI_FONT)
+                .to_owned(),
             default_location: value
                 .get("default_location")
                 .and_then(serde_json::Value::as_str)
@@ -275,6 +286,7 @@ impl UserPreferences {
                 ThemeMode::Dark => "dark",
             },
             "accent": self.accent_color.key(),
+            "font": self.ui_font,
             "default_location": self.default_location.as_ref().map(|path| path.to_string_lossy()),
             "favorite_folders": self.favorite_folders.iter().map(|path| path.to_string_lossy().into_owned()).collect::<Vec<_>>(),
             "auto_calculate_folder_sizes": self.auto_calculate_folder_sizes,
@@ -410,6 +422,7 @@ mod tests {
                 language,
                 theme_mode: ThemeMode::Dark,
                 accent_color: AccentColor::Rose,
+                ui_font: "Georgia".into(),
                 default_location: Some(location.clone()),
                 favorite_folders: vec![location.clone()],
                 auto_calculate_folder_sizes: false,
