@@ -85,7 +85,14 @@ jobs:
       - name: Install WiX Toolset
         if: runner.os == 'Windows'
         shell: pwsh
-        run: choco install wixtoolset --version=3.14.1 --yes --no-progress
+        run: |
+          $wix = Join-Path ${env:ProgramFiles(x86)} 'WiX Toolset v3.14/bin'
+          if (-not (Test-Path (Join-Path $wix 'candle.exe'))) {
+            choco install wixtoolset --version=3.14.1 --yes --no-progress
+          }
+          if (-not (Test-Path (Join-Path $wix 'candle.exe'))) {
+            throw "WiX Toolset v3.14 was not found at $wix"
+          }
 
       - name: Install macOS Bundle Tool
         if: runner.os == 'macOS'
