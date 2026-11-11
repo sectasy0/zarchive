@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+    Id="*"
+    Name="zarchive"
+    Language="1033"
+    Version="$(var.ProductVersion)"
+    Manufacturer="sectasy0"
+    UpgradeCode="6E8C9424-54E7-4DB8-9A2D-AFC38FA9B724">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of zarchive is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <UIRef Id="WixUI_Minimal" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="zarchive" />
+      </Directory>
+      <Directory Id="CommonProgramsFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="zarchive" />
+      </Directory>
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="ApplicationExecutable" Guid="*">
+        <File Id="ZArchiveExecutable" Source="$(var.PackageDir)\zarchive.exe" KeyPath="yes" />
+      </Component>
+
+      <Component Id="ArchiveShellMenu" Guid="*">
+        <RegistryKey Root="HKLM" Key="Software\Classes\*\shell\ZArchive">
+          <RegistryValue Name="MUIVerb" Value="ZArchive" Type="string" />
+          <RegistryValue Name="Icon" Value="[INSTALLFOLDER]zarchive.exe" Type="string" />
+          <RegistryValue Name="AppliesTo" Value="System.FileExtension:=&quot;.zip&quot; OR System.FileExtension:=&quot;.7z&quot; OR System.FileExtension:=&quot;.rar&quot; OR System.FileExtension:=&quot;.tar&quot; OR System.FileExtension:=&quot;.tar.gz&quot; OR System.FileExtension:=&quot;.tgz&quot; OR System.FileExtension:=&quot;.tar.bz2&quot; OR System.FileExtension:=&quot;.tbz&quot; OR System.FileExtension:=&quot;.tbz2&quot; OR System.FileExtension:=&quot;.tar.xz&quot; OR System.FileExtension:=&quot;.txz&quot; OR System.FileExtension:=&quot;.tar.zst&quot; OR System.FileExtension:=&quot;.tar.lz4&quot; OR System.FileExtension:=&quot;.tar.lz&quot; OR System.FileExtension:=&quot;.tar.br&quot; OR System.FileExtension:=&quot;.gz&quot; OR System.FileExtension:=&quot;.bz2&quot; OR System.FileExtension:=&quot;.xz&quot; OR System.FileExtension:=&quot;.zst&quot; OR System.FileExtension:=&quot;.lz4&quot; OR System.FileExtension:=&quot;.lz&quot; OR System.FileExtension:=&quot;.br&quot; OR System.FileExtension:=&quot;.cpio&quot; OR System.FileExtension:=&quot;.ar&quot; OR System.FileExtension:=&quot;.a&quot; OR System.FileExtension:=&quot;.pax&quot; OR System.FileExtension:=&quot;.xar&quot; OR System.FileExtension:=&quot;.cab&quot;" Type="string" />
+          <RegistryKey Key="shell\ExtractHere">
+            <RegistryValue Name="MUIVerb" Value="Extract here" Type="string" />
+            <RegistryKey Key="command">
+              <RegistryValue Value="&quot;[INSTALLFOLDER]zarchive.exe&quot; --shell-action extract-here &quot;%1&quot;" Type="string" KeyPath="yes" />
+            </RegistryKey>
+          </RegistryKey>
+          <RegistryKey Key="shell\TestIntegrity">
+            <RegistryValue Name="MUIVerb" Value="Test integrity" Type="string" />
+            <RegistryKey Key="command">
+              <RegistryValue Value="&quot;[INSTALLFOLDER]zarchive.exe&quot; --shell-action integrity &quot;%1&quot;" Type="string" />
+            </RegistryKey>
+          </RegistryKey>
+          <RegistryKey Key="shell\AuditArchive">
+            <RegistryValue Name="MUIVerb" Value="Audit archive" Type="string" />
+            <RegistryKey Key="command">
+              <RegistryValue Value="&quot;[INSTALLFOLDER]zarchive.exe&quot; --shell-action audit &quot;%1&quot;" Type="string" />
+            </RegistryKey>
+          </RegistryKey>
+        </RegistryKey>
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="ApplicationShortcut" Guid="*">
+        <Shortcut
+          Id="StartMenuShortcut"
+          Name="zarchive"
+          Target="[INSTALLFOLDER]zarchive.exe"
+          WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue
+          Root="HKLM"
+          Key="Software\sectasy0\zarchive"
+          Name="installed"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="ProductFeature" Title="zarchive" Level="1">
+      <ComponentRef Id="ApplicationExecutable" />
+      <ComponentRef Id="ArchiveShellMenu" />
+      <ComponentRef Id="ApplicationShortcut" />
+      <ComponentGroupRef Id="RuntimeFiles" />
+    </Feature>
+  </Product>
+</Wix>

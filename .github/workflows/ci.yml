@@ -82,8 +82,17 @@ jobs:
       - name: Build Release Binary
         run: cargo build --locked --release --target ${{ matrix.target }}
 
+      - name: Install WiX Toolset
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install wixtoolset --version=3.14.1 --yes --no-progress
+
+      - name: Install macOS Bundle Tool
+        if: runner.os == 'macOS'
+        run: cargo install cargo-bundle --version 0.12.0 --locked
+
       - name: Package Unix Binary
-        if: runner.os != 'Windows'
+        if: runner.os == 'Linux'
         shell: bash
         env:
           BUILD_TARGET: ${{ matrix.target }}
@@ -92,16 +101,87 @@ jobs:
           mkdir -p dist
           tar -czf "dist/zarchive-${PLATFORM}.tar.gz" -C "target/${BUILD_TARGET}/release" zarchive
 
+      - name: Package macOS App and DMG
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          cargo bundle --release --target "$BUILD_TARGET" --format osx \
+            --binary-path "target/${BUILD_TARGET}/release/zarchive"
+
+          bundle_directory="target/${BUILD_TARGET}/release/bundle/osx"
+          app_bundle="$(find "$bundle_directory" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          if [[ -z "$app_bundle" ]]; then
+            echo "cargo-bundle did not produce an .app under $bundle_directory" >&2
+            exit 1
+          fi
+
+          mkdir -p dist/dmg
+          ditto "$app_bundle" "dist/dmg/$(basename "$app_bundle")"
+          ln -s /Applications dist/dmg/Applications
+          hdiutil create -volname "ZArchive" -srcfolder dist/dmg -ov -format UDZO \
+            dist/zarchive-macos-arm64.dmg
+
       - name: Package Windows Binary and Runtime Libraries
         if: runner.os == 'Windows'
         shell: pwsh
         env:
           BUILD_TARGET: ${{ matrix.target }}
         run: |
-          New-Item -ItemType Directory -Force dist, package | Out-Null
-          Copy-Item "target/$env:BUILD_TARGET/release/zarchive.exe" package/
-          Copy-Item "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin/*.dll" package/
-          Compress-Archive -Path package/* -DestinationPath dist/zarchive-windows-x64.zip
+          $ErrorActionPreference = 'Stop'
+          $dist = Join-Path $PWD 'dist'
+          $package = Join-Path $PWD 'package'
+          $runtime = Join-Path $PWD 'runtime'
+          New-Item -ItemType Directory -Force $dist, $package, $runtime | Out-Null
+          Copy-Item "target/$env:BUILD_TARGET/release/zarchive.exe" $package/
+
+          $vcpkgBin = Join-Path $env:VCPKG_INSTALLATION_ROOT 'installed/x64-windows/bin'
+          $vcpkgDlls = Get-ChildItem -Path $vcpkgBin -Filter '*.dll' -File
+          if (-not $vcpkgDlls) { throw "No Vcpkg runtime DLLs found in $vcpkgBin" }
+
+          $redistRoot = $env:VCToolsRedistDir
+          if ([string]::IsNullOrWhiteSpace($redistRoot) -or -not (Test-Path $redistRoot)) {
+            $vsWhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+            $vsInstall = & $vsWhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            if (-not $vsInstall) { throw 'Unable to locate the MSVC runtime redistributables' }
+            $redistRoot = Join-Path $vsInstall 'VC/Redist/MSVC'
+          }
+          $crtDirectory = Get-ChildItem -Path $redistRoot -Directory -Recurse |
+            Where-Object { $_.FullName -match '\\x64\\Microsoft\.VC\d+\.CRT$' } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $crtDirectory) { throw "Unable to locate x64 MSVC CRT DLLs under $redistRoot" }
+          $crtDlls = Get-ChildItem -Path $crtDirectory.FullName -Filter '*.dll' -File
+          if (-not $crtDlls) { throw "No MSVC CRT DLLs found in $($crtDirectory.FullName)" }
+
+          Copy-Item $vcpkgDlls.FullName -Destination $package -Force
+          Copy-Item $vcpkgDlls.FullName -Destination $runtime -Force
+          Copy-Item $crtDlls.FullName -Destination $package -Force
+          Copy-Item $crtDlls.FullName -Destination $runtime -Force
+          Compress-Archive -Path (Join-Path $package '*') -DestinationPath (Join-Path $dist 'zarchive-windows-x64.zip')
+
+          $wix = Join-Path ${env:ProgramFiles(x86)} 'WiX Toolset v3.14/bin'
+          $heat = Join-Path $wix 'heat.exe'
+          $candle = Join-Path $wix 'candle.exe'
+          $light = Join-Path $wix 'light.exe'
+          foreach ($tool in @($heat, $candle, $light)) {
+            if (-not (Test-Path $tool)) { throw "WiX tool not found: $tool" }
+          }
+
+          $versionMatch = [regex]::Match((Get-Content Cargo.toml -Raw), '(?m)^version = "([^"-]+(?:-[^"+]*)?)"')
+          if (-not $versionMatch.Success) { throw 'Unable to read package version from Cargo.toml' }
+          $version = $versionMatch.Groups[1].Value
+          $harvested = Join-Path $dist 'RuntimeFiles.wxs'
+          & $heat dir $runtime -cg RuntimeFiles -dr INSTALLFOLDER -srd -sreg -var var.RuntimeDir -ag -out $harvested
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $candle -nologo -arch x64 "-dProductVersion=$version" "-dPackageDir=$package" "-dRuntimeDir=$runtime" -out (Join-Path $dist 'Product.wixobj') installer/Product.wxs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $candle -nologo -arch x64 "-dProductVersion=$version" "-dPackageDir=$package" "-dRuntimeDir=$runtime" -out (Join-Path $dist 'RuntimeFiles.wixobj') $harvested
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $light -nologo -ext WixUIExtension -out (Join-Path $dist 'zarchive-windows-x64.msi') (Join-Path $dist 'Product.wixobj') (Join-Path $dist 'RuntimeFiles.wixobj')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload Build
         uses: actions/upload-artifact@v4

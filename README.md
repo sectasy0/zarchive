@@ -690,14 +690,17 @@ After the tests pass, native release builds run for:
 
 | Platform | Architecture | Artifact |
 | :--- | :--- | :--- |
-| macOS | Apple Silicon (ARM64) | `zarchive-macos-arm64` |
+| macOS | Apple Silicon (ARM64) | `zarchive-macos-arm64.dmg` |
 | Linux (Ubuntu 24.04) | x64 | `zarchive-linux-x64` |
-| Windows | x64 | `zarchive-windows-x64` |
+| Windows | x64 | `zarchive-windows-x64` (ZIP and MSI) |
 
 Download the archives from **Actions > CI > workflow run > Artifacts**. Artifacts
-are retained for 14 days. The Windows ZIP includes the native dependency DLLs;
-keep them beside `zarchive.exe` after extraction. Unix archives contain the
-executable and still require the corresponding system libraries. On macOS,
+are retained for 14 days. The macOS DMG contains `zarchive.app`, which uses the
+icons configured in `package.metadata.bundle`. The Windows ZIP and MSI include
+Vcpkg and MSVC runtime DLLs. The MSI also adds a **ZArchive** Explorer submenu
+for extracting here, testing integrity, and auditing supported archives. Linux
+archives contain the executable and still require the corresponding system
+libraries. On macOS,
 install the compression libraries with `brew install libb2 xz zstd lz4`.
 Build-time native dependencies for each runner are defined in
 `.github/actions/setup-native/action.yml`.

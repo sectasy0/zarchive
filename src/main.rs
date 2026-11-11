@@ -41,6 +41,7 @@ use gpui::{
     WindowOptions, div, point, prelude::*, px, rgb, size, svg,
 };
 use i18n::Language;
+use inspection::InspectionMode;
 use icons::IconAssets;
 pub(crate) use preferences::{AccentColor, AdvancedSettings, SYSTEM_UI_FONT, ThemeMode, UserPreferences};
 use preferences::{load_user_preferences, user_preferences_path};
@@ -971,10 +972,46 @@ impl ArchiveManager {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShellAction {
+    ExtractHere,
+    Integrity,
+    Audit,
+}
+
+impl ShellAction {
+    fn parse(value: &std::ffi::OsStr) -> Option<Self> {
+        match value.to_str()? {
+            "extract-here" => Some(Self::ExtractHere),
+            "integrity" => Some(Self::Integrity),
+            "audit" => Some(Self::Audit),
+            _ => None,
+        }
+    }
+}
+
+fn parse_startup_arguments(
+    mut arguments: impl Iterator<Item = std::ffi::OsString>,
+) -> (Option<PathBuf>, Option<ShellAction>) {
+    let Some(first) = arguments.next() else {
+        return (None, None);
+    };
+    if first == std::ffi::OsStr::new("--shell-action") {
+        let action = arguments.next().as_deref().and_then(ShellAction::parse);
+        let path = arguments.next().map(PathBuf::from);
+        match (action, path) {
+            (Some(action), Some(path)) => (Some(path), Some(action)),
+            _ => (None, None),
+        }
+    } else {
+        (Some(PathBuf::from(first)), None)
+    }
+}
+
 /// Loads startup state and launches the GPUI archive manager window.
 fn main() {
     let mut preferences = load_user_preferences();
-    let startup_path = std::env::args_os().nth(1).map(PathBuf::from);
+    let (startup_path, startup_action) = parse_startup_arguments(std::env::args_os().skip(1));
     let startup_is_archive = startup_path.as_deref().is_some_and(is_supported_archive);
     let mut startup_requires_password = false;
     let (current_directory, archive_path, archive_name, entries, error) = if startup_is_archive {
@@ -1113,7 +1150,7 @@ fn main() {
                             .clone()
                             .into_iter()
                             .collect();
-                        ArchiveManager {
+                        let mut manager = ArchiveManager {
                             browsers,
                             active_browser: 0,
                             inspector_focus: false,
@@ -1157,7 +1194,43 @@ fn main() {
                             recovery: recovery::State::new(cx),
                             conversion: conversion::State::new(cx),
                             background_queue: task_queue::BackgroundQueue::default(),
+                        };
+                        if let (Some(action), Some(path)) =
+                            (startup_action, manager.archive_path.clone())
+                        {
+                            let name = path
+                                .file_name()
+                                .unwrap_or(path.as_os_str())
+                                .to_string_lossy()
+                                .into_owned();
+                            let target = file_actions::EntryTarget {
+                                name,
+                                key: path.to_string_lossy().into_owned(),
+                                path: path.clone(),
+                                archive_entry: None,
+                                password: manager.archive_password.clone(),
+                                is_directory: false,
+                            };
+                            match action {
+                                ShellAction::ExtractHere => {
+                                    manager.request_extract_archive(&target, true, window, cx);
+                                }
+                                ShellAction::Integrity | ShellAction::Audit => {
+                                    let mode = if action == ShellAction::Integrity {
+                                        InspectionMode::Integrity
+                                    } else {
+                                        InspectionMode::Audit
+                                    };
+                                    manager.inspect_sources(
+                                        vec![(path, target.password.clone())],
+                                        mode,
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            }
                         }
+                        manager
                     })
                 },
             )
@@ -1169,9 +1242,27 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdvancedSettings, ArchiveEntry, SortColumn, entry_icon, file_icon,
+        AdvancedSettings, ArchiveEntry, ShellAction, SortColumn, entry_icon, file_icon,
         icon_aspect_ratio, sort_entries, visible_entries,
     };
+    use std::path::PathBuf;
+
+    #[test]
+    fn parses_shell_action_and_archive_path_arguments() {
+        for (argument, expected_action) in [
+            ("extract-here", ShellAction::ExtractHere),
+            ("integrity", ShellAction::Integrity),
+            ("audit", ShellAction::Audit),
+        ] {
+            let (path, action) = super::parse_startup_arguments(
+                ["--shell-action", argument, "C:\\Archives\\my archive.zip"]
+                    .into_iter()
+                    .map(std::ffi::OsString::from),
+            );
+            assert_eq!(path, Some(PathBuf::from("C:\\Archives\\my archive.zip")));
+            assert_eq!(action, Some(expected_action));
+        }
+    }
 
     #[gpui::test]
     fn browser_column_layout_is_saved_and_shared_across_tabs(cx: &mut gpui::TestAppContext) {
