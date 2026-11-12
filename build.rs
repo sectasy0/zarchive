@@ -2,6 +2,13 @@ use std::{env, fs, path::{Path, PathBuf}};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    #[cfg(not(test))]
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rerun-if-changed=installer/windows-shell.rc");
+        embed_resource::compile("installer/windows-shell.rc", embed_resource::NONE)
+            .manifest_optional()
+            .expect("Could not embed localized Windows shell menu strings");
+    }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
         println!("cargo:rustc-link-lib=b2");
     }

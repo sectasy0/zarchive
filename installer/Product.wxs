@@ -29,23 +29,23 @@
 
       <Component Id="ArchiveShellMenu" Guid="*">
         <RegistryKey Root="HKLM" Key="Software\Classes\*\shell\ZArchive">
-          <RegistryValue Name="MUIVerb" Value="ZArchive" Type="string" />
+          <RegistryValue Name="MUIVerb" Value="@[#ZArchiveExecutable],-100" Type="string" />
           <RegistryValue Name="Icon" Value="[INSTALLFOLDER]zarchive.exe" Type="string" />
           <RegistryValue Name="AppliesTo" Value="System.FileExtension:=&quot;.zip&quot; OR System.FileExtension:=&quot;.7z&quot; OR System.FileExtension:=&quot;.rar&quot; OR System.FileExtension:=&quot;.tar&quot; OR System.FileExtension:=&quot;.tar.gz&quot; OR System.FileExtension:=&quot;.tgz&quot; OR System.FileExtension:=&quot;.tar.bz2&quot; OR System.FileExtension:=&quot;.tbz&quot; OR System.FileExtension:=&quot;.tbz2&quot; OR System.FileExtension:=&quot;.tar.xz&quot; OR System.FileExtension:=&quot;.txz&quot; OR System.FileExtension:=&quot;.tar.zst&quot; OR System.FileExtension:=&quot;.tar.lz4&quot; OR System.FileExtension:=&quot;.tar.lz&quot; OR System.FileExtension:=&quot;.tar.br&quot; OR System.FileExtension:=&quot;.gz&quot; OR System.FileExtension:=&quot;.bz2&quot; OR System.FileExtension:=&quot;.xz&quot; OR System.FileExtension:=&quot;.zst&quot; OR System.FileExtension:=&quot;.lz4&quot; OR System.FileExtension:=&quot;.lz&quot; OR System.FileExtension:=&quot;.br&quot; OR System.FileExtension:=&quot;.cpio&quot; OR System.FileExtension:=&quot;.ar&quot; OR System.FileExtension:=&quot;.a&quot; OR System.FileExtension:=&quot;.pax&quot; OR System.FileExtension:=&quot;.xar&quot; OR System.FileExtension:=&quot;.cab&quot;" Type="string" />
           <RegistryKey Key="shell\ExtractHere">
-            <RegistryValue Name="MUIVerb" Value="Extract here" Type="string" />
+            <RegistryValue Name="MUIVerb" Value="@[#ZArchiveExecutable],-101" Type="string" />
             <RegistryKey Key="command">
               <RegistryValue Value="&quot;[INSTALLFOLDER]zarchive.exe&quot; --shell-action extract-here &quot;%1&quot;" Type="string" KeyPath="yes" />
             </RegistryKey>
           </RegistryKey>
           <RegistryKey Key="shell\TestIntegrity">
-            <RegistryValue Name="MUIVerb" Value="Test integrity" Type="string" />
+            <RegistryValue Name="MUIVerb" Value="@[#ZArchiveExecutable],-102" Type="string" />
             <RegistryKey Key="command">
               <RegistryValue Value="&quot;[INSTALLFOLDER]zarchive.exe&quot; --shell-action integrity &quot;%1&quot;" Type="string" />
             </RegistryKey>
           </RegistryKey>
           <RegistryKey Key="shell\AuditArchive">
-            <RegistryValue Name="MUIVerb" Value="Audit archive" Type="string" />
+            <RegistryValue Name="MUIVerb" Value="@[#ZArchiveExecutable],-103" Type="string" />
             <RegistryKey Key="command">
               <RegistryValue Value="&quot;[INSTALLFOLDER]zarchive.exe&quot; --shell-action audit &quot;%1&quot;" Type="string" />
             </RegistryKey>

@@ -1,0 +1,56 @@
+#include <windows.h>
+#pragma code_page(65001)
+
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+STRINGTABLE
+BEGIN
+  100 "zarchive"
+  101 "Extract here"
+  102 "Test integrity"
+  103 "Audit archive"
+END
+
+LANGUAGE LANG_POLISH, SUBLANG_DEFAULT
+STRINGTABLE
+BEGIN
+  100 "zarchive"
+  101 "Wypakuj tutaj"
+  102 "Sprawdź integralność"
+  103 "Audytuj archiwum"
+END
+
+LANGUAGE LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED
+STRINGTABLE
+BEGIN
+  100 "zarchive"
+  101 "在此处解压"
+  102 "检查完整性"
+  103 "审计压缩包"
+END
+
+LANGUAGE LANG_SPANISH, SUBLANG_SPANISH_MODERN
+STRINGTABLE
+BEGIN
+  100 "zarchive"
+  101 "Extraer aquí"
+  102 "Comprobar integridad"
+  103 "Auditar archivo"
+END
+
+LANGUAGE LANG_JAPANESE, SUBLANG_DEFAULT
+STRINGTABLE
+BEGIN
+  100 "zarchive"
+  101 "ここに展開"
+  102 "整合性を確認"
+  103 "アーカイブを監査"
+END
+
+LANGUAGE LANG_GERMAN, SUBLANG_GERMAN
+STRINGTABLE
+BEGIN
+  100 "zarchive"
+  101 "Hier entpacken"
+  102 "Integrität testen"
+  103 "Archiv prüfen"
+END
